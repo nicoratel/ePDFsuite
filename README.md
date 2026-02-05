@@ -122,15 +122,11 @@ Please check the repository for license information.
 If you use ePDFsuite in your research, please cite:
 
 ```
-[Author names]. (Year). ePDFsuite: Python library for SAED data processing and PDF extraction.
+[N. Ratel-Ramond]. (2026). ePDFsuite: Python library for SAED data processing and PDF extraction.
 GitHub repository: https://github.com/nicoratel/ePDFsuite
 ```
 
-## Related Resources
 
-- **Electron Diffraction**: Learn about electron diffraction techniques and theory
-- **PDF Analysis**: Background on pair distribution function analysis
-- **TEM**: Transmission electron microscopy fundamentals
 
 ## Support
 
