@@ -51,40 +51,7 @@ cd ePDFsuite
 pip install -r requirements.txt  # If available
 ```
 
-## Quick Start
 
-### 1. Import the Library
-
-```python
-import ePDFsuite
-from calibration import CameraCalibration
-from pdf_extraction import PDFExtractor
-```
-
-### 2. Load Your Data
-
-```python
-from filereader import load_diffraction_pattern
-
-# Load your SAED pattern
-pattern = load_diffraction_pattern('path/to/your/saed_pattern.dm3')
-```
-
-### 3. Calibrate
-
-```python
-# Perform camera calibration
-calibrator = CameraCalibration()
-camera_constant = calibrator.calibrate(pattern, known_d_spacing)
-```
-
-### 4. Extract PDF
-
-```python
-# Extract pair distribution function
-extractor = PDFExtractor()
-pdf = extractor.extract(pattern, camera_constant)
-```
 
 ### 5. Example Workflow
 
