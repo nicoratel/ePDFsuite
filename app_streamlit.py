@@ -270,11 +270,24 @@ with tab3:
             label_visibility="collapsed"
         )
     
+    # ========== DEFAULT VALUES ==========
+    _default_bgscale = 1.0
+    _default_qmin = 1.5
+    _default_qmax = 24.0
+    _default_qmaxinst = 24.0
+    _default_rpoly = 1.4
+    _default_lorch = True
+    _default_composition = "Au"
+    
     # ========== BEAMSTOP OPTION ==========
     st.markdown("### 🔍 Image Processing")
     beamstop = st.checkbox("Beamstop present on sample images", value=False)
     
     # ========== OUTPUT PARAMETERS SECTION ==========
+    st.markdown("## 📋 Input Parameters")
+    
+    composition = st.text_input("Chemical composition", value=_default_composition, placeholder="e.g., Au, NaCl, Au3Cu")
+    
     st.markdown("## ⚙️ Output Parameters")
     
     col_out1, col_out2 = st.columns(2)
@@ -297,19 +310,6 @@ with tab3:
     
     # ========== PROCESSING SECTION ==========
     st.markdown("## 📊 PDF Calculation")
-    
-    # Default values for interactive sliders
-    _default_bgscale = 1.0
-    _default_qmin = 1.5
-    _default_qmax = 24.0
-    _default_qmaxinst = 24.0  # Max limit for qmax slider
-    _default_rpoly = 1.4
-    _default_lorch = True
-    _default_composition = "Au"
-    
-    # Use defaults for processing (sliders can be adjusted after calculation)
-    # Note: beamstop is already defined from the checkbox above
-    composition = _default_composition
     
     # Processing button
     if st.button("🚀 Calculate PDF", type="primary"):
