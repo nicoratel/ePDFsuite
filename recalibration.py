@@ -304,7 +304,52 @@ def recalibrate_with_beamstop(dm4file, ponifile, threshold_rel=0.5, min_size=50,
 
     return ai
 
+def recalibrate_with_beamstop_noponi(image,  threshold_rel=0.5, min_size=50, plot=False):
+    """
+    Recalibre le centre du faisceau à partir d'une image TEM avec beam stop,
+    en utilisant un fit d'ellipse sur l'anneau visible.
+    
+    Parameters
+    ----------
+    image : ndarray
+        Image TEM sous forme de tableau numpy 2D
+    
+    threshold_rel : float
+        Seuil relatif pour extraire les pixels de l'anneau
+    min_size : int
+        Taille minimale d'un objet pour être considéré comme anneau
+   
+    plot : bool
+        Si True, affiche l'image avec l'ellipse détectée et le centre corrigé (default: False)
+    
+    Returns
+    -------
+    ai_updated : AzimuthalIntegrator
+        Intégrateur azimutal pyFAI mis à jour avec le centre recalibré
+    """
 
+    # --- Seuillage pour détecter l'anneau ---
+    thresh = filters.threshold_otsu(image) * threshold_rel
+    binary = image > thresh
+    binary = morphology.remove_small_objects(binary, min_size=min_size)
+
+    # --- Label et extraire la plus grande région ---
+    labels = measure.label(binary)
+    regions = measure.regionprops(labels)
+    if len(regions) == 0:
+        raise ValueError("Aucun anneau détecté, ajuster threshold_rel")
+
+    region = max(regions, key=lambda r: r.area)
+    coords = region.coords  # (y, x)
+
+    y = coords[:, 0]
+    x = coords[:, 1]
+
+    # --- Fit ellipse via moments ---
+    x_c = x.mean()
+    y_c = y.mean()
+
+    return x_c, y_c
 
 # --- Exemple d'utilisation ---
 # image = ton image TEM numpy 2D

@@ -137,6 +137,15 @@ def compute_ePDF(
         qmaxinst = qmax
 
     # --- Background subtraction ---
+    # First, ensure Iref is on the same q-grid as Iexp by interpolation if needed
+    if Iref is not None:
+        if len(Iref) != len(Iexp):
+            # Create a q-grid for the reference data based on its length
+            q_ref = np.linspace(q[0], q[-1], len(Iref))
+            # Interpolate reference intensity to match the sample's q-grid
+            Iref = np.interp(q, q_ref, Iref)
+    
+    # Then subtract the background
     if Iref is not None:
         Iexp = Iexp - bgscale * Iref
 
@@ -203,7 +212,12 @@ def compute_ePDF(
         ax[1].set_xlabel("Q ($\\AA^{-1}$)")
         ax[1].set_ylabel("F(Q)")
         ax[1].set_xlim([qmin, qmax])
-        ax[1].set_ylim([np.min(Fc[mask_plot]), np.max(Fc[mask_plot])])
+        # Filter out NaN and Inf values before setting y limits
+        Fc_valid = Fc[mask_plot][np.isfinite(Fc[mask_plot])]
+        if len(Fc_valid) > 0:
+            ax[1].set_ylim([np.min(Fc_valid), np.max(Fc_valid)])
+        else:
+            ax[1].set_ylim([0, 1])  # Fallback to default limits if no valid values
 
         # Plot 3: Final PDF
         ax[2].plot(r, G, label=f"rpoly={rpoly:.2f}")
