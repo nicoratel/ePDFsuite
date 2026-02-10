@@ -9,4 +9,5 @@ pyFAI>=0.24.0
 abtem>=0.20.0
 pandas>=1.3.0
 pymatgen
+fabio
 -e
