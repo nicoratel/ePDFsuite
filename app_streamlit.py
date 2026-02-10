@@ -65,9 +65,8 @@ st.markdown("""
 # Add stop button in sidebar
 st.sidebar.markdown("---")
 if st.sidebar.button("🛑 Stop App", type="secondary"):
-    st.info("✋ Stopping application...")
-    import signal
-    os.kill(os.getpid(), signal.SIGTERM)
+    st.success("👋 Thanks for using ePDFsuite! Session ended.")
+    st.stop()
 
 # Create three tabs
 tab1, tab2, tab3 = st.tabs(["📊 Geometric Calibration", "📸 Plot Data", "📈 PDF Extraction"])
