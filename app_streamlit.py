@@ -69,112 +69,13 @@ if st.sidebar.button("🛑 Stop App", type="secondary"):
     st.stop()
 
 # Create three tabs
-tab1, tab2, tab3 = st.tabs(["📊 Geometric Calibration", "📸 Plot Data", "📈 PDF Extraction"])
+# Create two tabs (Geometric Calibration tab removed - requires Qt which doesn't work with Streamlit)
+tab1, tab2 = st.tabs(["📸 Plot Data", "📈 PDF Extraction"])
 
 # ============================================================================
-# TAB 1: GEOMETRIC CALIBRATION
+# TAB 1: PLOT DATA (FORMERLY TAB 2)
 # ============================================================================
 with tab1:
-    st.markdown("# 📊 Geometric Calibration")
-    st.markdown("**Perform geometric calibration using pyFAI-calib2. Upload a calibrant diffraction image and the corresponding CIF file.**")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("## 📁 Input Files")
-        
-        # Upload calibrant diffraction image
-        calibrant_image = st.file_uploader(
-            "📷 Calibrant diffraction image (DM4, DM3, TIF, TIFF)",
-            type=["dm4", "dm3", "tif", "tiff"],
-            key="calibrant_image"
-        )
-        
-        # Upload CIF file
-        cif_file = st.file_uploader(
-            "📄 Calibrant CIF file",
-            type=["cif"],
-            key="cif_file"
-        )
-    
-    # Display calibrant image if uploaded
-    if calibrant_image is not None:
-        st.subheader("Image Preview")
-        
-        # Save uploaded file temporarily
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".dm4") as tmp_file:
-            tmp_file.write(calibrant_image.getbuffer())
-            tmp_path = tmp_file.name
-        
-        try:
-            # Load and display image
-            metadata, img = load_data(tmp_path, verbose=False)
-            
-            # Create matplotlib figure for calibrant image with LogNorm
-            fig, ax = plt.subplots(figsize=(5, 5))
-            im = ax.imshow(img / np.max(img), cmap='gray', 
-                          norm=LogNorm(vmin=1e-4, vmax=1))
-            ax.set_title("Calibrant Diffraction Image")
-            ax.set_xlabel("X (pixels)")
-            ax.set_ylabel("Y (pixels)")
-            plt.colorbar(im, ax=ax, label="Intensity (normalized)")
-            st.pyplot(fig)
-            plt.close(fig)
-            
-            # Display metadata
-            with st.expander("📋 Metadata"):
-                st.json(metadata)
-        
-        except Exception as e:
-            st.error(f"Error loading image: {e}")
-        
-        finally:
-            # Clean up temporary file
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-    
-    # Calibration button
-    if st.button("🔧 Perform Calibration", type="primary"):
-        if calibrant_image is None or cif_file is None:
-            st.error("❌ Please upload both the image and CIF file")
-        else:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".dm4") as tmp_img:
-                tmp_img.write(calibrant_image.getbuffer())
-                tmp_img_path = tmp_img.name
-            
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".cif") as tmp_cif:
-                tmp_cif.write(cif_file.getbuffer())
-                tmp_cif_path = tmp_cif.name
-            
-            try:
-                st.info("⏳ Calibration in progress...")
-                st.info("📌 A pyFAI-calib2 window will open for interactive adjustment of center and distance.")
-                
-                # Call the calibration function
-                perform_geometric_calibration(
-                    cif_file=tmp_cif_path,
-                    image_file=tmp_img_path
-                )
-                
-                st.success("✅ Calibration completed! A PONI file has been generated.")
-                st.info("📁 The PONI file will be available in the current directory for the 'PDF Extraction' tab")
-            
-            except Exception as e:
-                st.error(f"❌ Error during calibration: {e}")
-                import traceback
-                st.error(traceback.format_exc())
-            
-            finally:
-                # Clean up temporary files
-                if os.path.exists(tmp_img_path):
-                    os.remove(tmp_img_path)
-                if os.path.exists(tmp_cif_path):
-                    os.remove(tmp_cif_path)
-
-# ============================================================================
-# TAB 2: PLOT DATA
-# ============================================================================
-with tab2:
     st.markdown("# 📸 Sample Data Visualization")
     st.markdown("**Visualize your sample diffraction image with the recalibrated beam center.**")
     
@@ -231,9 +132,9 @@ with tab2:
         st.info("📤 Please upload a sample image to visualize")
 
 # ============================================================================
-# TAB 3: PDF EXTRACTION
+# TAB 2: PDF EXTRACTION (FORMERLY TAB 3)
 # ============================================================================
-with tab3:
+with tab2:
     st.markdown("# 📈 PDF Extraction")
     st.markdown("**Calculate the Pair Distribution Function (PDF) from your sample and reference images. Adjust parameters with interactive sliders.**")
     
@@ -533,38 +434,28 @@ with tab3:
             )
             Fc = Fm - background
         
-            # Create Plotly subplots: I(q) and F(q) side by side, G(r) below
-            fig = make_subplots(
-                rows=2, cols=2,
-                specs=[[{}, {}], [{"colspan": 2}, None]],
-                subplot_titles=("1. Raw Intensities (for bgscale adjustment)",
-                               "2. Corrected Structure Factor",
-                               "3. Radial Distribution Function (PDF)"),
-                vertical_spacing=0.15,
-                horizontal_spacing=0.12
-            )
-            
-            # Plot 1: Raw intensities
+            # Create 3 separate figures with individual legends, maintaining original layout
             mask_plot = (q >= qmin_int) & (q <= qmax_int)
             
-            # Convert to lists and handle NaN/inf properly
+            # ===== FIGURE 1: Raw Intensities =====
+            fig1 = go.Figure()
+            
             q_plot1 = q.tolist()
             iexp_plot1 = Iexp_orig.tolist()
             
-            fig.add_trace(
+            fig1.add_trace(
                 go.Scatter(x=q_plot1, y=iexp_plot1, mode='lines', name='Iexp (raw)',
                           line=dict(color='blue', width=2),
-                          hovertemplate='Q: %{x:.3f}<br>I: %{y:.3e}<extra></extra>'),
-                row=1, col=1
+                          hovertemplate='Q: %{x:.3f}<br>I: %{y:.3e}<extra></extra>')
             )
+            
             if I_ref is not None:
                 I_ref_bgscaled = (bgscale_int * I_ref).tolist()
-                fig.add_trace(
+                fig1.add_trace(
                     go.Scatter(x=q_plot1, y=I_ref_bgscaled, mode='lines',
-                              name=f'bgscale*Iref (bgscale={bgscale_int:.2f})',
+                              name=f'bgscale×Iref (scale={bgscale_int:.2f})',
                               line=dict(color='red', width=2),
-                              hovertemplate='Q: %{x:.3f}<br>I: %{y:.3e}<extra></extra>'),
-                    row=1, col=1
+                              hovertemplate='Q: %{x:.3f}<br>I: %{y:.3e}<extra></extra>')
                 )
             
             # Calculate Y-axis limits based on data in [qmin, qmax]
@@ -576,23 +467,32 @@ with tab3:
                 y_min_plot1 = min(y_min_plot1, np.min(iref_in_range))
                 y_max_plot1 = max(y_max_plot1, np.max(iref_in_range))
             
-            # Add 5% margin
             y_margin = 0.05 * (y_max_plot1 - y_min_plot1)
             
-            fig.update_xaxes(title_text="Q (Å⁻¹)", row=1, col=1)
-            fig.update_yaxes(title_text="Intensity", row=1, col=1)
-            fig.update_xaxes(range=[qmin_int, qmax_int], row=1, col=1)
-            fig.update_yaxes(range=[y_min_plot1 - y_margin, y_max_plot1 + y_margin], row=1, col=1)
+            fig1.update_layout(
+                title="1. Raw Intensities (for bgscale adjustment)",
+                xaxis_title="Q (Å⁻¹)",
+                yaxis_title="Intensity",
+                hovermode='x unified',
+                showlegend=True,
+                legend=dict(x=0.7, y=0.95),
+                height=350,
+                margin=dict(l=60, r=40, t=60, b=50)
+            )
+            fig1.update_xaxes(range=[qmin_int, qmax_int])
+            fig1.update_yaxes(range=[y_min_plot1 - y_margin, y_max_plot1 + y_margin])
             
-            # Plot 2: Corrected structure factor - handle NaN properly
+            # ===== FIGURE 2: Corrected Structure Factor =====
+            fig2 = go.Figure()
+            
             q_plot2 = q.tolist()
             fc_plot2 = Fc.tolist()
             
-            fig.add_trace(
-                go.Scatter(x=q_plot2, y=fc_plot2, mode='lines', name=f'F(Q) (rpoly={rpoly_int:.2f})',
-                          line=dict(color='blue', width=2),
-                          hovertemplate='Q: %{x:.3f}<br>F(Q): %{y:.3e}<extra></extra>'),
-                row=1, col=2
+            fig2.add_trace(
+                go.Scatter(x=q_plot2, y=fc_plot2, mode='lines', 
+                          name=f'F(Q) (rpoly={rpoly_int:.2f})',
+                          line=dict(color='darkblue', width=2),
+                          hovertemplate='Q: %{x:.3f}<br>F(Q): %{y:.3e}<extra></extra>')
             )
             
             # Calculate Y-axis limits for F(Q) based on data in [qmin, qmax]
@@ -601,34 +501,50 @@ with tab3:
             y_min_plot2 = np.min(fc_valid) if len(fc_valid) > 0 else 0
             y_max_plot2 = np.max(fc_valid) if len(fc_valid) > 0 else 1
             
-            # Add 5% margin
             y_margin2 = 0.05 * (y_max_plot2 - y_min_plot2)
             
-            fig.update_xaxes(title_text="Q (Å⁻¹)", row=1, col=2)
-            fig.update_yaxes(title_text="F(Q)", row=1, col=2)
-            fig.update_xaxes(range=[qmin_int, qmax_int], row=1, col=2)
-            fig.update_yaxes(range=[y_min_plot2 - y_margin2, y_max_plot2 + y_margin2], row=1, col=2)
-            
-            # Plot 3: Final PDF (full width)
-            fig.add_trace(
-                go.Scatter(x=r_pdf, y=G_pdf, mode='lines', name=f'G(r) (rpoly={rpoly_int:.2f})',
-                          line=dict(color='blue', width=2),
-                          hovertemplate='r: %{x:.3f}<br>G(r): %{y:.3e}<extra></extra>'),
-                row=2, col=1
-            )
-            
-            fig.update_xaxes(title_text="r (Å)", row=2, col=1)
-            fig.update_yaxes(title_text="G(r)", row=2, col=1)
-            
-            fig.update_layout(
-                height=700,
-                width=1200,
-                title_text="ePDF Analysis Results",
-                title_font_size=16,
+            fig2.update_layout(
+                title="2. Corrected Structure Factor",
+                xaxis_title="Q (Å⁻¹)",
+                yaxis_title="F(Q)",
+                hovermode='x unified',
                 showlegend=True,
-                hovermode='closest'
+                legend=dict(x=0.7, y=0.95),
+                height=350,
+                margin=dict(l=60, r=40, t=60, b=50)
             )
-            st.plotly_chart(fig, use_container_width=True)
+            fig2.update_xaxes(range=[qmin_int, qmax_int])
+            fig2.update_yaxes(range=[y_min_plot2 - y_margin2, y_max_plot2 + y_margin2])
+            
+            # Display first two figures side by side
+            col_fig1, col_fig2 = st.columns(2)
+            with col_fig1:
+                st.plotly_chart(fig1, use_container_width=True)
+            with col_fig2:
+                st.plotly_chart(fig2, use_container_width=True)
+            
+            # ===== FIGURE 3: Radial Distribution Function =====
+            fig3 = go.Figure()
+            
+            fig3.add_trace(
+                go.Scatter(x=r_pdf, y=G_pdf, mode='lines', 
+                          name=f'G(r) (rpoly={rpoly_int:.2f})',
+                          line=dict(color='darkgreen', width=2),
+                          hovertemplate='r: %{x:.3f}<br>G(r): %{y:.3e}<extra></extra>')
+            )
+            
+            fig3.update_layout(
+                title="3. Radial Distribution Function (PDF)",
+                xaxis_title="r (Å)",
+                yaxis_title="G(r)",
+                hovermode='x unified',
+                showlegend=True,
+                legend=dict(x=0.7, y=0.95),
+                height=350,
+                margin=dict(l=60, r=40, t=60, b=50)
+            )
+            
+            st.plotly_chart(fig3, use_container_width=True)
         
         # Put download button in LEFT column
         with col_controls:
