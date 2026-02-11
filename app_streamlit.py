@@ -338,8 +338,8 @@ with tab2:
         # Put all sliders in LEFT column
         with col_controls:
             st.markdown("### 🎚️ Parameters")
-            bgscale_int = st.slider("bgscale", 0.0, 2.0, _default_bgscale, 0.01, key="bgscale_slider")
-            qmin_int = st.slider("qmin (Å⁻¹)", float(np.min(st.session_state.q_data)), q_max_data, _default_qmin, 0.1, key="qmin_slider")
+            bgscale_int = st.slider("bgscale", 0.0, 2.5, _default_bgscale, 0.01, key="bgscale_slider")
+            qmin_int = st.slider("qmin (Å⁻¹)", 0.1, q_max_data, _default_qmin, 0.1, key="qmin_slider")
             qmax_int = st.slider("qmax (Å⁻¹)", float(np.min(st.session_state.q_data)), q_max_data, _default_qmax, 0.1, key="qmax_slider")
             rpoly_int = st.slider("rpoly", 0.1, 10.0, _default_rpoly, 0.1, key="rpoly_slider")
             qmaxinst_int = st.slider("qmaxinst (Å⁻¹)", float(np.min(st.session_state.q_data)), q_max_data, _default_qmaxinst, 0.1, key="qmaxinst_slider")
