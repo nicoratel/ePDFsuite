@@ -169,6 +169,9 @@ with tab2:
             key="ref_image",
             label_visibility="collapsed"
         )
+
+        st.markdown("---")
+        st.info("💡 **PONI files** contain geometric calibration data of the camera. They are obtained using **pyFAI-calib2** (from the PyFAI Python library) from diffraction data of a polycrystalline standard specimen (e.g., Au, Si).")
     
     # ========== DEFAULT VALUES ==========
     _default_bgscale = 1.0
