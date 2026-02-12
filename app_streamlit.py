@@ -70,7 +70,7 @@ if st.sidebar.button("🛑 Stop App", type="secondary"):
 
 # Create three tabs
 # Create two tabs (Geometric Calibration tab removed - requires Qt which doesn't work with Streamlit)
-tab1, tab2 = st.tabs(["📸 Plot Data", "📈 PDF Extraction"])
+tab2, tab1 = st.tabs(["📸 Plot Data", "📈 PDF Extraction"])
 
 # ============================================================================
 # TAB 1: PLOT DATA (FORMERLY TAB 2)
