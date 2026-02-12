@@ -294,19 +294,12 @@ with tab2:
                 # Try to integrate reference image if available
                 if ref_path:
                     try:
-                        # Integrate reference image
-                        if poni_path:
-                            from pyFAI import load
-                            ai = load(poni_path)
-                            _, ref_img = load_data(ref_path, verbose=False)
-                            q_ref, I_ref = ai.integrate1d(ref_img, npt=2500, unit="q_A^-1")
-                            # Interpolate to sample q grid
-                            st.session_state.I_ref = np.interp(st.session_state.q_data, q_ref, I_ref)
-                        else:
-                            # Use custom integration
-                            proc_temp = SAEDProcessor(ref_path, poni_file=None, beamstop=beamstop)
-                            q_ref, I_ref = proc_temp.integrate(ref_path, plot=False)
-                            st.session_state.I_ref = np.interp(st.session_state.q_data, q_ref, I_ref)
+                        # Integrate reference image with beam center recalibration
+                        # Using SAEDProcessor ensures consistent center recalibration
+                        proc_ref = SAEDProcessor(ref_path, poni_file=poni_path, beamstop=beamstop, verbose=False)
+                        q_ref, I_ref = proc_ref.integrate(ref_path, plot=False)
+                        # Interpolate to sample q grid
+                        st.session_state.I_ref = np.interp(st.session_state.q_data, q_ref, I_ref)
                     except Exception as e:
                         st.warning(f"Could not integrate reference image: {e}")
                         st.session_state.I_ref = None
