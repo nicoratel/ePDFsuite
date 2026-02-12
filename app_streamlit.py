@@ -170,7 +170,7 @@ with tab2:
             label_visibility="collapsed"
         )
 
-        st.markdown("---")
+        #st.markdown("---")
         st.info("💡 **PONI files** contain geometric calibration data of the camera. They can be obtained using **pyFAI-calib2** (from the PyFAI Python library) from diffraction data of a polycrystalline standard specimen (e.g., Au, Si).")
     
     # ========== DEFAULT VALUES ==========
