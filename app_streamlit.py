@@ -171,7 +171,7 @@ with tab2:
         )
 
         #st.markdown("---")
-        st.info("💡 **PONI files** contain geometric calibration data of the camera. They can be obtained using [perform_geometric_calibration](https://github.com/nicoratel/ePDFsuite/blob/main/Camera_Calibration_readME.md) function from ePDFsuite.calibration based on diffraction data of a polycrystalline standard specimen (e.g., Au, Si).\n")
+        st.info("💡 **PONI files** contain advanced geometric calibration data of the camera, taking into account camera rotations.\n They can be obtained using [perform_geometric_calibration](https://github.com/nicoratel/ePDFsuite/blob/main/Camera_Calibration_readME.md) function from ePDFsuite.calibration based on diffraction data of a polycrystalline standard specimen (e.g., Au, Si)...\n ")
     
     # ========== DEFAULT VALUES ==========
     _default_bgscale = 1.0
