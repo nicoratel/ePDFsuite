@@ -553,4 +553,6 @@ with tab2:
 
 # Footer
 st.markdown("---")
-st.markdown("💡 **ePDFsuite** - Interactive interface for PDF analysis from electron diffraction (SAED) data. \n[N. Ratel-Ramond]. (2026). ePDFsuite: Python library for SAED data processing and PDF extraction.GitHub repository: https://github.com/nicoratel/ePDFsuite")
+st.markdown("💡 **ePDFsuite** - Interactive interface for PDF analysis from electron diffraction (SAED) data.")
+st.markdown("**Citation:**")
+st.markdown("[N. Ratel-Ramond]. (2026). ePDFsuite: Python library for SAED data processing and PDF extraction.GitHub repository: https://github.com/nicoratel/ePDFsuite")
