@@ -219,7 +219,7 @@ with tab2:
         if not sample_images:
             st.error("❌ Please upload at least one sample image")
         elif poni_file is None:
-            st.warning("⚠️ No PONI file provided - using automatic recalibration")
+            st.warning("No PONI file provided - using automatic recalibration")
         
         # Save uploaded files temporarily
         temp_files = []
@@ -553,4 +553,5 @@ with tab2:
 
 # Footer
 st.markdown("---")
-st.markdown("💡 **ePDFsuite** - Interactive interface for PDF analysis from electron diffraction (SAED) data")
+st.markdown("💡 **ePDFsuite** - Interactive interface for PDF analysis from electron diffraction (SAED) data. \n[N. Ratel-Ramond]. (2026). ePDFsuite: Python library for SAED data processing and PDF extraction.
+GitHub repository: https://github.com/nicoratel/ePDFsuite")
