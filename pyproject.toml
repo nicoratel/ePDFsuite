@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ePDFsuite"
+version = "0.1.0"
+description = "My ePDF analysis toolkit"
+authors = [{name = "Nicolas Ratel-Ramond"}]
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["src"]
