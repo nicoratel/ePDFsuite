@@ -5,9 +5,46 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ePDFsuite"
 version = "0.1.0"
-description = "My ePDF analysis toolkit"
+description = "Python toolkit for electron pair distribution function (ePDF) analysis from SAED data"
 authors = [{name = "Nicolas Ratel-Ramond"}]
-dependencies = []
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+keywords = ["SAED", "electron diffraction", "PDF", "RDF", "distribution function", "crystallography"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Topic :: Scientific/Engineering :: Chemistry",
+]
+dependencies = [
+    "numpy>=1.26.0,<2.0.0",
+    "scipy>=1.11.0,<2.0.0",
+    "matplotlib>=3.8.0,<4.0.0",
+    "diffpy-cmi>=3.1.0,<4.0.0",
+    "ase>=3.22.0,<4.0.0",
+    "pymatgen>=2024.1.1",
+    "abtem>=1.0.0,<2.0.0",
+    "hyperspy>=2.0.0,<3.0.0",
+    "pyFAI>=2024.0.0",
+    "scikit-image>=0.22.0,<1.0.0",
+    "ipywidgets>=8.0.0",
+    "plotly>=5.0.0",
+    "h5py>=3.0.0",
+    "tqdm>=4.60.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/nicoratel/ePDFsuite"
+Documentation = "https://github.com/nicoratel/ePDFsuite/wiki"
+Repository = "https://github.com/nicoratel/ePDFsuite"
+Issues = "https://github.com/nicoratel/ePDFsuite/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
