@@ -10,8 +10,8 @@ with open("requirements.txt", "r", encoding="utf-8") as fh:
 setup(
     name="ePDFsuite",
     version="0.1.0",
-    author="Nicolas Ratel",
-    author_email="your.email@example.com",  # Update this
+    author="Nicolas Ratel-Ramond",
+    author_email="nicolas.ratel-ramond@insa-toulouse.fr",  
     description="Python library for SAED data processing and PDF extraction with interactive Streamlit GUI",
     long_description=long_description,
     long_description_content_type="text/markdown",
