@@ -135,7 +135,7 @@ def compute_ePDF(
         qmax = q.max()
     if qmaxinst is None:
         qmaxinst = qmax
-
+    Iraw= Iexp.copy()  # Keep a copy of the raw intensity for plotting
     # --- Background subtraction ---
     # First, ensure Iref is on the same q-grid as Iexp by interpolation if needed
     if Iref is not None:
@@ -194,7 +194,7 @@ def compute_ePDF(
         fig, ax = plt.subplots(3, figsize=(4, 6))
         
         # Plot 1: Raw intensities
-        ax[0].plot(q, Iexp, label="Iexp")
+        ax[0].plot(q, Iraw, label="Iexp")
         if Iref is not None:
             ax[0].plot(q, bgscale * Iref, label="Ref*bgscale")
         ax[0].legend()
@@ -204,7 +204,7 @@ def compute_ePDF(
         mask_plot = (q >= qmin) & (q <= qmax)
         ax[0].set_xlim([qmin, qmax])
         # set intensity limits to [min(Iexp), max(Iexp)] in the q range
-        ax[0].set_ylim([np.min(Iexp[mask_plot]), np.max(Iexp[mask_plot])])
+        ax[0].set_ylim([np.min(Iraw[mask_plot]), np.max(Iraw[mask_plot])])
 
         # Plot 2: Corrected structure factor
         ax[1].plot(q, Fc, label=f"rpoly={rpoly:.2f}")

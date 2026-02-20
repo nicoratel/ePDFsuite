@@ -44,11 +44,14 @@ class SAEDProcessor:
             dm4_file = self.dm4_file
 
         if self.use_pyfai:
+            # Load the image data for the specified file
+            _, img_data = load_data(dm4_file, verbose=False)
+            
             if not self.beamstop:
                 self.ai = recalibrate_no_beamstop(dm4_file, self.poni_file) # seek beamcentre
             else:
                 self.ai = recalibrate_with_beamstop(dm4_file, self.poni_file, threshold_rel=0.5, min_size=200)
-            q, I = self.ai.integrate1d(self.img, npt, unit="q_A^-1", polarization_factor=0.99)
+            q, I = self.ai.integrate1d(img_data, npt, unit="q_A^-1", polarization_factor=0.99)
 
         else: # use method 'with beamstop', 
             # Charger l'image
@@ -272,7 +275,7 @@ class PDFInteractive:
             self.composition = None
         # integrate reference image if provided
         if ref_diffraction_image is not None and SAEDProcessor is not None:
-            _, Iref = SAEDProcessor.integrate(dm4_file=ref_diffraction_image, plot=False)
+            _, Iref = SAEDProcessor.integrate(dm4_file=self.ref_diffraction_image, plot=False)
         else:
             Iref = None
         
@@ -396,36 +399,7 @@ class PDFInteractive:
 
         np.savetxt(outputfile, np.column_stack((self.last_r, self.last_G)),header=header,delimiter=' ',comments='')
         
-        """
-        # Collect metadata from sliders and configuration
-        metadata = {
-            'Composition': self.pdf_config.get('composition', 'N/A'),
-            'bgscale': f"{self.bgscale_slider.value:.4f}",
-            'qmin (Å⁻¹)': f"{self.qmin_slider.value:.4f}",
-            'qmax (Å⁻¹)': f"{self.qmax_slider.value:.4f}",
-            'qmaxinst (Å⁻¹)': f"{self.qmaxinst_slider.value:.4f}",
-            'rpoly': f"{self.rpoly_slider.value:.4f}",
-            'Lorch correction': str(self.lorch_checkbox.value),
-            'rmin (Å)': f"{self.pdf_config.get('rmin', 0):.4f}",
-            'rmax (Å)': f"{self.pdf_config.get('rmax', 50):.4f}",
-            'rstep (Å)': f"{self.pdf_config.get('rstep', 0.01):.4f}",
-        }
         
-        # Write file with metadata header
-        with open(fname, 'w') as f:
-                       
-            for key, value in metadata.items():
-                f.write(f"{key:.<40} = {value}\n")
-            
-            f.write("\n" )
-            f.write("#DATA: r (Å) vs G(r)\n")
-            
-            
-            # Write data
-            for r_val, g_val in zip(self.last_r, self.last_G):
-                f.write(f"{r_val:15.6f} {g_val:20.8f}\n")
-        
-        print(f"Results saved in {fname}")"""
 
     def show(self):
         """
