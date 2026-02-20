@@ -129,8 +129,7 @@ def compute_ePDF(
     rstep=0.01,
     rpoly=1.4,
     Lorch=True,
-    plot=False,
-    xray=False
+    plot=False,    
 ):
     if qmax is None:
         qmax = q.max()
@@ -158,7 +157,7 @@ def compute_ePDF(
         x_max=qmax,
         x_step=qstep,
         qvalues=True,
-        xray=xray,
+        xray=False,
     )
     f2avg = np.interp(q, q_f2, f2avg)
 
