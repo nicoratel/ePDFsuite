@@ -9,7 +9,7 @@ import hyperspy.api as hs
 
 
 class SAEDProcessor:
-    def __init__(self, dm4_file, poni_file = None,beamstop = False,verbose=False):
+    def __init__(self, dm4_file, poni_file = None,beamstop = True,verbose=False):
         """
         Docstring pour __init__
         
@@ -45,13 +45,14 @@ class SAEDProcessor:
             # Load the image data for the specified file
             _, img_data = load_data(dm4_file, verbose=False)
             
-            if not self.beamstop:
-                self.ai = recalibrate_no_beamstop(dm4_file, self.poni_file) # seek beamcentre
-            else:
-                self.ai = recalibrate_with_beamstop(dm4_file, self.poni_file, threshold_rel=0.5, min_size=200)
+            if self.beamstop:
+                self.ai = recalibrate_with_beamstop(dm4_file, self.poni_file) # seek beamcentre
+            else: # recalibrate with beamstop correction
+                self.ai = recalibrate_no_beamstop(dm4_file, self.poni_file)
+            
             q, I = self.ai.integrate1d(img_data, npt, unit="q_A^-1", polarization_factor=0.99)
 
-        else: # use method 'with beamstop', 
+        else: # intégration personnalisée sans pyFAI, pour les cas où il n'y a pas de fichier de calibration ou que les images ont des résolutions différentes
             # Charger l'image
             img = hs.load(dm4_file)
             
@@ -94,8 +95,18 @@ class SAEDProcessor:
         plt.figure()
         plt.imshow(self.img/np.max(self.img), cmap=cmap,norm = LogNorm(vmin=10**(vmin), vmax=10**(vmax)))
     
+    def plot_recalibrated_image(self):
+        if self.use_pyfai:
+            if self.beamstop:
+                _ = recalibrate_with_beamstop(self.dm4_file, self.poni_file, plot=True)
+            else:
+                _ = recalibrate_no_beamstop(self.dm4_file, self.poni_file, plot=True)
+        else:
+            _ = recalibrate_with_beamstop_noponi(self.img, plot=True)
+
     def extract_epdf(self,
                      ref_diffraction_image=None,
+                     ref_poni_file=None,
                      composition = 'Au',                     
                      rmin=0.1,
                      rmax=50.0,
@@ -121,30 +132,58 @@ class SAEDProcessor:
 
         # Recalibrate centre
         if self.use_pyfai:
-            # Initialize Azimuthal Integrator from poni file
-            ai=load(self.poni_file)
-            if not self.beamstop:
-                ai = recalibrate_no_beamstop(
-                dm4file=sample_diffraction_image,
-                ponifile=self.poni_file,
-                )
+            # Use the already calibrated AzimuthalIntegrator from self.ai if available,
+            # otherwise recalibrate
+            if hasattr(self, 'ai') and self.ai is not None:
+                ai = self.ai
             else:
-                ai = recalibrate_with_beamstop(
-                dm4file=sample_diffraction_image,
-                ponifile=self.poni_file,
-                threshold_rel=0.5,
-                min_size=80,
-                plot=False
-                )
+                # Initialize Azimuthal Integrator from poni file and recalibrate
+                if not self.beamstop:
+                    ai = recalibrate_no_beamstop(
+                    dm4file=sample_diffraction_image,
+                    ponifile=self.poni_file,
+                    )
+                else:
+                    ai = recalibrate_with_beamstop(
+                    dm4file=sample_diffraction_image,
+                    ponifile=self.poni_file,
+                    threshold_rel=0.5,
+                    min_size=80,
+                    plot=False
+                    )
+                # Store the calibrated ai for future use
+                self.ai = ai
             
-
-            # Integrate sample and reference images
+            # Integrate sample image
             q_sample, intensity_sample = ai.integrate1d(
                 sample_data,
                 npt=2500,
                 unit="q_A^-1")
+            
+            # Integrate reference image
             if ref_data is not None:
-                q_ref, intensity_ref = ai.integrate1d(
+                # If ref_poni_file is provided or images have different resolutions
+                if ref_poni_file is not None or ref_data.shape != sample_data.shape:
+                    # Recalibrate separately for reference
+                    poni_for_ref = ref_poni_file if ref_poni_file is not None else self.poni_file
+                    if not self.beamstop:
+                        ai_ref = recalibrate_no_beamstop(
+                            dm4file=ref_diffraction_image,
+                            ponifile=poni_for_ref
+                        )
+                    else:
+                        ai_ref = recalibrate_with_beamstop(
+                            dm4file=ref_diffraction_image,
+                            ponifile=poni_for_ref,
+                            threshold_rel=0.5,
+                            min_size=80,
+                            plot=False
+                        )
+                else:
+                    # Use same ai if resolutions match
+                    ai_ref = ai
+                
+                q_ref, intensity_ref = ai_ref.integrate1d(
                     ref_data,
                     npt=2500,
                     unit="q_A^-1")
@@ -425,6 +464,7 @@ class PDFInteractive:
 
 def extract_ePDF_from_mutliple_files(dm4_files,
                                      ref_diffraction_image=None,
+                                     ref_poni_file=None,
                                      composition = 'Au',
                                      rmin=0.1,
                                      rmax=50.0,
@@ -446,6 +486,7 @@ def extract_ePDF_from_mutliple_files(dm4_files,
         
         :param dm4_files: list of file paths to SAED data files in DM4, DM3, tif, tiff format
         :param ref_diffraction_image: file path to reference diffraction image
+        :param ref_poni_file: file path to PONI file for reference (if different resolution from sample)
         :param composition: chemical composition of the sample
         :param rmin: minimum r value for PDF calculation
         :param rmax: maximum r value for PDF calculation
@@ -483,7 +524,16 @@ def extract_ePDF_from_mutliple_files(dm4_files,
         
         average_radial_profile = np.mean(I_interpolated, axis=0)
         # Integrate reference image
-        qref, Iref = proc.integrate(dm4_file= ref_diffraction_image, plot=False) if ref_diffraction_image is not None else (None, None)
+        if ref_diffraction_image is not None:
+            if ref_poni_file is not None:
+                # Use separate processor for reference if different poni file provided
+                proc_ref = SAEDProcessor(ref_diffraction_image, ref_poni_file, beamstop, verbose)
+                qref, Iref = proc_ref.integrate(ref_diffraction_image, plot=False)
+            else:
+                # Use same processor (poni file) for reference
+                qref, Iref = proc.integrate(dm4_file=ref_diffraction_image, plot=False)
+        else:
+            qref, Iref = None, None
 
         # extract PDF using average profile and reference profile
         if not interactive:
