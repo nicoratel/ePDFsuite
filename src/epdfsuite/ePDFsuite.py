@@ -57,7 +57,7 @@ class SAEDProcessor:
             img = hs.load(dm4_file)
             
             # Recalibrer le centre
-            center_x, center_y = recalibrate_with_beamstop_noponi(img.data, threshold_rel=0.5, min_size=50, plot=True)
+            center_x, center_y = recalibrate_with_beamstop_noponi(img.data, threshold_rel=0.5, min_size=50, plot=False)
             
             # Calculer le profil radial
             y, x = np.indices(img.data.shape)
