@@ -16,7 +16,7 @@ class SAEDProcessor:
         :param self: Description
         :param dm4_file: SAED data file in DM4, DM3, tif, tiff format
         :param poni_file: geometric calibration file in .poni format
-        :param beamstop: Boolean indicating presence of beamstop on the image
+        :param beamstop: Boolean indicating presence of beamstop on the image -> affects recalibration method
         """
         self.dm4_file = dm4_file
         self.poni_file = poni_file
@@ -36,7 +36,7 @@ class SAEDProcessor:
             
 
 
-    def integrate(self, dm4_file=None, npt=2500, plot=False):
+    def integrate(self, dm4_file=None, npt=2500, initial_center=None, plot=False):
 
         if dm4_file is None:
             dm4_file = self.dm4_file
@@ -46,7 +46,7 @@ class SAEDProcessor:
             _, img_data = load_data(dm4_file, verbose=False)
             
             if self.beamstop:
-                self.ai = recalibrate_with_beamstop(dm4_file, self.poni_file) # seek beamcentre
+                self.ai = recalibrate_with_beamstop(dm4_file, self.poni_file, initial_center=initial_center) # seek beamcentre
             else: # recalibrate with beamstop correction
                 self.ai = recalibrate_no_beamstop(dm4_file, self.poni_file)
             
@@ -57,7 +57,7 @@ class SAEDProcessor:
             img = hs.load(dm4_file)
             
             # Recalibrer le centre
-            center_x, center_y = recalibrate_with_beamstop_noponi(img.data, threshold_rel=0.5, min_size=50, plot=False)
+            center_x, center_y = recalibrate_with_beamstop_noponi(img.data, threshold_rel=0.5, min_size=50, initial_center=initial_center, plot=False)
             
             # Calculer le profil radial
             y, x = np.indices(img.data.shape)
@@ -95,14 +95,14 @@ class SAEDProcessor:
         plt.figure()
         plt.imshow(self.img/np.max(self.img), cmap=cmap,norm = LogNorm(vmin=10**(vmin), vmax=10**(vmax)))
     
-    def plot_recalibrated_image(self):
+    def plot_recalibrated_image(self, initial_center=None):
         if self.use_pyfai:
             if self.beamstop:
-                _ = recalibrate_with_beamstop(self.dm4_file, self.poni_file, plot=True)
+                _ = recalibrate_with_beamstop(self.dm4_file, self.poni_file, initial_center=initial_center, plot=True)
             else:
                 _ = recalibrate_no_beamstop(self.dm4_file, self.poni_file, plot=True)
         else:
-            _ = recalibrate_with_beamstop_noponi(self.img, plot=True)
+            _ = recalibrate_with_beamstop_noponi(self.img, initial_center=initial_center, plot=True)
 
     def extract_epdf(self,
                      ref_diffraction_image=None,
@@ -113,7 +113,12 @@ class SAEDProcessor:
                      rstep=0.01,
                      outputfile=None,
                      interactive = True,
-                     plot = False):
+                     plot = False,
+                     bgscale=1,
+                     qmin=1.5,
+                     qmax=24,
+                     qmaxinst=24,
+                     rpoly=1.4):
         # retrive wavelength from metadata
         wavelength = self.metadata['wavelength']
         camera = self.metadata['camera_title']
@@ -218,20 +223,20 @@ class SAEDProcessor:
             # Return a reference to the results that will be updated by sliders
             return PDFResultsReference(pdf_interactive)
         else:
-            print('Compute PDF with default parameters')
+            print('Compute PDF with given parameters')
             r,G = compute_ePDF(
                 q_sample,
                 intensity_sample,
                 composition,
                 Iref=intensity_ref if ref_data is not None else None,
-                bgscale=0.8,
-                qmin=0.8,
-                qmax=24,
-                qmaxinst=24,
-                rmin=0.0,
-                rmax=50.0,
-                rstep=0.01,
-                rpoly=1.4,
+                bgscale=bgscale,
+                qmin=qmin,
+                qmax=qmax,
+                qmaxinst=qmaxinst,
+                rmin=rmin,
+                rmax=rmax,
+                rstep=rstep,
+                rpoly=rpoly,
                 Lorch=True,
                 plot=plot)
             # header should have same architecture as .gr files from pdfgetx3 for compatibility with PDFBatchAnalysis
@@ -601,14 +606,14 @@ def extract_ePDF_from_mutliple_files(dm4_files,
                 average_radial_profile,
                 composition,
                 Iref=Iref if ref_diffraction_image is not None else None,
-                bgscale=1.0,
+                bgscale=bgscale,
                 qmin=qmin,
                 qmax=qmax,
                 qmaxinst=qmaxinst,
                 rmin=rmin,
                 rmax=rmax,
                 rstep=rstep,
-                rpoly=1.4,
+                rpoly=rpoly,
                 Lorch=True,
                 plot=True)
             

@@ -105,10 +105,11 @@ def recalibrate_no_beamstop(dm4file, ponifile, output_ponifile=None,plot=False):
     return ai
 
 def recalibrate_with_beamstop(dm4file, ponifile, center_mask_radius=None, threshold_rel=0.5, 
-                              min_size=50, output_ponifile=None, plot=False):
+                              min_size=50, max_iterations=5, convergence_threshold=1.0,
+                              initial_center=None, output_ponifile=None, plot=False):
     """
     Recalibrate beam center from a TEM image with beam stop.
-    Uses the improved ring detection method with initial center from max intensity.
+    Uses an iterative ring detection method with initial center from max intensity.
     
     Parameters
     ----------
@@ -123,6 +124,12 @@ def recalibrate_with_beamstop(dm4file, ponifile, center_mask_radius=None, thresh
         Relative threshold to extract ring pixels (fraction of max intensity)
     min_size : int
         Minimum size of an object to be considered as a ring
+    max_iterations : int
+        Maximum number of iterations for center refinement (default: 5)
+    convergence_threshold : float
+        Stop iterations when center displacement is below this value in pixels (default: 1.0)
+    initial_center : tuple or None
+        Initial center coordinates as (x, y) in pixels. If None, uses max intensity position (default: None)
     output_ponifile : str
         Path to save updated poni file (optional)
     plot : bool
@@ -152,63 +159,100 @@ def recalibrate_with_beamstop(dm4file, ponifile, center_mask_radius=None, thresh
     ai.detector.pixel1 = ai.detector.pixel1 * binning_y
     ai.detector.pixel2 = ai.detector.pixel2 * binning_x
     
-    # --- Initial center estimation (max intensity) ---
-    y_init, x_init = np.unravel_index(np.argmax(image), image.shape)
+    # --- Initial center estimation ---
+    if initial_center is not None:
+        x_c, y_c = initial_center
+        if plot:
+            print(f"Using user-provided initial center: ({x_c:.1f}, {y_c:.1f})")
+    else:
+        # Use max intensity as initial center
+        x_c, y_c = np.unravel_index(np.argmax(image), image.shape)[::-1]  # x, y order
+        if plot:
+            print(f"Using max intensity as initial center: ({x_c:.1f}, {y_c:.1f})")
     
     # --- Define central mask radius if not provided ---
     if center_mask_radius is None:
         center_mask_radius = min(image.shape) * 0.075
     
-    # --- Create mask to exclude central region ---
+    # --- Iterative refinement ---
+    center_history = [(x_c, y_c)]
+    iteration = 0
+    displacement = float('inf')
+    
+    while displacement >= convergence_threshold :#and iteration < max_iterations:
+        # --- Create mask to exclude central region ---
+        Y, X = np.ogrid[:image.shape[0], :image.shape[1]]
+        distances = np.sqrt((X - x_c)**2 + (Y - y_c)**2)
+        mask_central = distances > center_mask_radius
+        
+        # --- Calculate radial profile to identify most intense ring ---
+        max_radius = int(np.sqrt((image.shape[0]/2)**2 + (image.shape[1]/2)**2))
+        radial_profile = np.zeros(max_radius)
+        radial_counts = np.zeros(max_radius)
+        
+        for r in range(int(center_mask_radius), max_radius):
+            ring_mask = (distances >= r) & (distances < r + 1)
+            ring_pixels = image[ring_mask]
+            if len(ring_pixels) > 0:
+                radial_profile[r] = np.mean(ring_pixels)
+                radial_counts[r] = len(ring_pixels)
+        
+        # Find most intense peak (main ring)
+        valid_radii = np.where(radial_counts > 0)[0]
+        if len(valid_radii) == 0:
+            raise ValueError("No ring detected. Check center_mask_radius or image.")
+        
+        peak_radius_idx = valid_radii[np.argmax(radial_profile[valid_radii])]
+        peak_intensity = radial_profile[peak_radius_idx]
+        
+        # --- Thresholding to isolate ring around peak ---
+        ring_width = peak_radius_idx * 0.4  # 40% of peak radius
+        ring_inner = max(center_mask_radius, peak_radius_idx - ring_width/2)
+        ring_outer = peak_radius_idx + ring_width/2
+        ring_mask = (distances >= ring_inner) & (distances <= ring_outer)
+        
+        # Intensity thresholding in this annular region
+        thresh = peak_intensity * threshold_rel
+        binary = (image > thresh) & ring_mask
+        binary = morphology.remove_small_objects(binary, min_size=min_size)
+        
+        # --- Extract coordinates and calculate center by moments ---
+        coords = np.column_stack(np.where(binary))
+        if len(coords) == 0:
+            raise ValueError("No pixels detected in ring. Adjust threshold_rel.")
+        
+        y = coords[:, 0]
+        x = coords[:, 1]
+        
+        # Center by intensity-weighted average
+        weights = image[y, x]
+        x_c_new = np.average(x, weights=weights)
+        y_c_new = np.average(y, weights=weights)
+        
+        # Check convergence
+        displacement = np.sqrt((x_c_new - x_c)**2 + (y_c_new - y_c)**2)
+        center_history.append((x_c_new, y_c_new))
+        x_c, y_c = x_c_new, y_c_new
+        iteration += 1
+    
+    if plot:
+        if displacement < convergence_threshold:
+            print(f"Convergence reached after {iteration} iterations (displacement: {displacement:.2f} px)")
+        else:
+            print(f"Max iterations ({max_iterations}) reached. Final displacement: {displacement:.2f} px)")
+    
+    # --- Ellipse calculation for visualization ---
+    # Recalculate with final center for plotting
     Y, X = np.ogrid[:image.shape[0], :image.shape[1]]
-    distances = np.sqrt((X - x_init)**2 + (Y - y_init)**2)
-    mask_central = distances > center_mask_radius
-    
-    # --- Calculate radial profile to identify most intense ring ---
-    max_radius = int(np.sqrt((image.shape[0]/2)**2 + (image.shape[1]/2)**2))
-    radial_profile = np.zeros(max_radius)
-    radial_counts = np.zeros(max_radius)
-    
-    for r in range(int(center_mask_radius), max_radius):
-        ring_mask = (distances >= r) & (distances < r + 1)
-        ring_pixels = image[ring_mask]
-        if len(ring_pixels) > 0:
-            radial_profile[r] = np.mean(ring_pixels)
-            radial_counts[r] = len(ring_pixels)
-    
-    # Find most intense peak (main ring)
-    valid_radii = np.where(radial_counts > 0)[0]
-    if len(valid_radii) == 0:
-        raise ValueError("No ring detected. Check center_mask_radius or image.")
-    
-    peak_radius_idx = valid_radii[np.argmax(radial_profile[valid_radii])]
-    peak_intensity = radial_profile[peak_radius_idx]
-    
-    # --- Thresholding to isolate ring around peak ---
-    ring_width = peak_radius_idx * 0.4  # 40% of peak radius
-    ring_inner = max(center_mask_radius, peak_radius_idx - ring_width/2)
-    ring_outer = peak_radius_idx + ring_width/2
+    distances = np.sqrt((X - x_c)**2 + (Y - y_c)**2)
     ring_mask = (distances >= ring_inner) & (distances <= ring_outer)
-    
-    # Intensity thresholding in this annular region
-    thresh = peak_intensity * threshold_rel
     binary = (image > thresh) & ring_mask
     binary = morphology.remove_small_objects(binary, min_size=min_size)
     
-    # --- Extract coordinates and calculate center by moments ---
     coords = np.column_stack(np.where(binary))
-    if len(coords) == 0:
-        raise ValueError("No pixels detected in ring. Adjust threshold_rel.")
-    
     y = coords[:, 0]
     x = coords[:, 1]
     
-    # Center by intensity-weighted average
-    weights = image[y, x]
-    x_c = np.average(x, weights=weights)
-    y_c = np.average(y, weights=weights)
-    
-    # --- Ellipse calculation for visualization ---
     cov = np.cov(x - x_c, y - y_c)
     evals, evecs = np.linalg.eig(cov)
     a, b = np.sqrt(evals)
@@ -234,25 +278,33 @@ def recalibrate_with_beamstop(dm4file, ponifile, center_mask_radius=None, thresh
         ax1.imshow(image, cmap='gray', vmin=vmin, vmax=vmax, origin='upper')
         
         # Circle for central mask
+        x_init, y_init = center_history[0]
         circle = plt.Circle((x_init, y_init), center_mask_radius,
                            fill=False, edgecolor='cyan', linewidth=2,
                            linestyle='--', label=f'Central mask (r={center_mask_radius:.0f}px)')
         ax1.add_patch(circle)
         
         # Annular search region
-        circle_inner = plt.Circle((x_init, y_init), ring_inner,
+        circle_inner = plt.Circle((x_c, y_c), ring_inner,
                                  fill=False, edgecolor='orange', linewidth=1.5,
                                  linestyle=':', alpha=0.7)
-        circle_outer = plt.Circle((x_init, y_init), ring_outer,
+        circle_outer = plt.Circle((x_c, y_c), ring_outer,
                                  fill=False, edgecolor='orange', linewidth=1.5,
                                  linestyle=':', alpha=0.7, label='Search region')
         ax1.add_patch(circle_inner)
         ax1.add_patch(circle_outer)
         
+        # Show center evolution
         ax1.plot(x_init, y_init, 'b+', markersize=15, markeredgewidth=2,
                 label='Initial center (max intensity)')
+        
+        # Plot intermediate centers if multiple iterations
+        if len(center_history) > 2:
+            for i, (x_h, y_h) in enumerate(center_history[1:-1], 1):
+                ax1.plot(x_h, y_h, 'y+', markersize=10, markeredgewidth=1.5, alpha=0.6)
+        
         ax1.plot(x_c, y_c, 'g+', markersize=15, markeredgewidth=2,
-                label='Recalibrated center')
+                label=f'Final center ({len(center_history)-1} iter.)')
         
         ax1.set_xlabel('X (pixels)', fontsize=12)
         ax1.set_ylabel('Y (pixels)', fontsize=12)
@@ -304,221 +356,22 @@ def recalibrate_with_beamstop(dm4file, ponifile, center_mask_radius=None, thresh
 
     return ai
 
-def recalibrate_with_beamstop_noponi_old(image, center_mask_radius=None, threshold_rel=0.5, 
-                                      min_size=50, max_search_iterations=5, plot=False):
-    """
-    Recalibre le centre du faisceau à partir d'une image TEM avec beam stop,
-    en détectant l'anneau de diffraction le plus intense distinct de la diffusion centrale.
-    
-    La méthode :
-    1. Estime un centre initial (max d'intensité)
-    2. Masque la région centrale pour exclure le faisceau direct et la diffusion centrale
-    3. Détecte l'anneau le plus intense en dehors de cette région
-    4. Ajuste une ellipse à l'anneau pour trouver le centre précis
-    5. Itère si nécessaire pour affiner le centre
-    
-    Parameters
-    ----------
-    image : ndarray
-        Image TEM sous forme de tableau numpy 2D
-    center_mask_radius : float or None
-        Rayon du masque central en pixels pour exclure la diffusion centrale.
-        Si None, calculé automatiquement (15% de la taille min de l'image)
-    threshold_rel : float
-        Seuil relatif pour extraire les pixels de l'anneau (fraction du max d'intensité)
-    min_size : int
-        Taille minimale d'un objet pour être considéré comme anneau
-    max_search_iterations : int
-        Nombre max d'itérations pour raffiner le centre
-    plot : bool
-        Si True, affiche l'image avec l'ellipse détectée et le centre corrigé (default: False)
-    
-    Returns
-    -------
-    x_c : float
-        Coordonnée X du centre en pixels
-    y_c : float
-        Coordonnée Y du centre en pixels
-    """
-    
-    # --- Estimation initiale du centre (max d'intensité) ---
-    y_init, x_init = np.unravel_index(np.argmax(image), image.shape)
-    
-    # Définir le rayon du masque central si non fourni
-    if center_mask_radius is None:
-        center_mask_radius = min(image.shape) * 0.075
-    
-    x_c, y_c = x_init, y_init
-    
-    # Itération pour affiner le centre
-    for iteration in range(max_search_iterations):
-        # --- Créer un masque pour exclure la région centrale ---
-        Y, X = np.ogrid[:image.shape[0], :image.shape[1]]
-        distances = np.sqrt((X - x_c)**2 + (Y - y_c)**2)
-        mask_central = distances > center_mask_radius
-        
-        # Appliquer le masque
-        image_masked = image.copy()
-        image_masked[~mask_central] = 0
-        
-        # --- Calculer le profil radial pour identifier l'anneau le plus intense ---
-        max_radius = int(np.sqrt((image.shape[0]/2)**2 + (image.shape[1]/2)**2))
-        radial_profile = np.zeros(max_radius)
-        radial_counts = np.zeros(max_radius)
-        
-        for r in range(int(center_mask_radius), max_radius):
-            ring_mask = (distances >= r) & (distances < r + 1)
-            ring_pixels = image[ring_mask]
-            if len(ring_pixels) > 0:
-                radial_profile[r] = np.mean(ring_pixels)
-                radial_counts[r] = len(ring_pixels)
-        
-        # Trouver le pic le plus intense (anneau principal)
-        valid_radii = np.where(radial_counts > 0)[0]
-        if len(valid_radii) == 0:
-            raise ValueError("Aucun anneau détecté. Vérifier center_mask_radius ou l'image.")
-        
-        peak_radius_idx = valid_radii[np.argmax(radial_profile[valid_radii])]
-        peak_intensity = radial_profile[peak_radius_idx]
-        
-        # --- Seuillage pour isoler l'anneau autour du pic ---
-        # Créer un masque annulaire autour du pic
-        ring_width = peak_radius_idx * 0.2  # 20% du rayon du pic
-        ring_inner = peak_radius_idx - ring_width/2
-        ring_outer = peak_radius_idx + ring_width/2
-        ring_mask = (distances >= ring_inner) & (distances <= ring_outer)
-        
-        # Seuillage sur l'intensité dans cette région annulaire
-        thresh = peak_intensity * threshold_rel
-        binary = (image > thresh) & ring_mask
-        binary = morphology.remove_small_objects(binary, min_size=min_size)
-        
-        # --- Label et extraire la région annulaire ---
-        labels = measure.label(binary)
-        regions = measure.regionprops(labels)
-        
-        if len(regions) == 0:
-            # Si aucune région, essayer avec un seuil plus bas
-            thresh = peak_intensity * (threshold_rel * 0.7)
-            binary = (image > thresh) & ring_mask
-            binary = morphology.remove_small_objects(binary, min_size=min_size)
-            labels = measure.label(binary)
-            regions = measure.regionprops(labels)
-            
-            if len(regions) == 0:
-                raise ValueError(f"Aucun anneau détecté à l'itération {iteration}. Ajuster threshold_rel ou center_mask_radius.")
-        
-        # Prendre la région avec le plus de pixels (ou la plus proche du rayon attendu)
-        region = max(regions, key=lambda r: r.area)
-        coords = region.coords  # (y, x)
-        
-        y = coords[:, 0]
-        x = coords[:, 1]
-        
-        # --- Fit ellipse via moments pour trouver le nouveau centre ---
-        x_c_new = x.mean()
-        y_c_new = y.mean()
-        
-        # Vérifier la convergence
-        shift = np.sqrt((x_c_new - x_c)**2 + (y_c_new - y_c)**2)
-        x_c, y_c = x_c_new, y_c_new
-        
-        if shift < 0.5:  # Convergence atteinte
-            break
-    
-    # --- Calcul final de l'ellipse pour visualisation ---
-    cov = np.cov(x - x_c, y - y_c)
-    evals, evecs = np.linalg.eig(cov)
-    a, b = np.sqrt(evals)
-    angle = np.arctan2(evecs[1, 0], evecs[0, 0])
-    
-    if plot:
-        fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(12, 4))
-        
-        # --- Plot 1: Image originale avec centre et masque ---
-        vmin, vmax = np.percentile(image, [1, 99])
-        ax1.imshow(image, cmap='gray', vmin=vmin, vmax=vmax, origin='upper')
-        
-        # Cercle pour le masque central
-        circle = plt.Circle((x_init, y_init), center_mask_radius, 
-                           fill=False, edgecolor='cyan', linewidth=2, 
-                           linestyle='--', label=f'Masque central (r={center_mask_radius:.0f}px)')
-        ax1.add_patch(circle)
-        
-        ax1.plot(x_init, y_init, 'b+', markersize=15, markeredgewidth=2,
-                label='Centre initial (max intensité)')
-        ax1.plot(x_c, y_c, 'g+', markersize=15, markeredgewidth=2,
-                label='Centre recalibré')
-        
-        ax1.set_xlabel('X (pixels)', fontsize=12)
-        ax1.set_ylabel('Y (pixels)', fontsize=12)
-        ax1.set_title('Image et masque central', fontsize=14)
-        ax1.legend(fontsize=10, loc='lower right')
-        ax1.grid(True, alpha=0.3)
-        
-        # --- Plot 2: Profil radial ---
-        ax2.plot(valid_radii, radial_profile[valid_radii], 'b-', linewidth=2)
-        ax2.axvline(peak_radius_idx, color='red', linestyle='--', linewidth=2, 
-                   label=f'Pic principal (r={peak_radius_idx}px)')
-        ax2.axhline(thresh, color='orange', linestyle='--', linewidth=1.5, 
-                   label=f'Seuil ({threshold_rel:.2f}×max)')
-        ax2.axvline(ring_inner, color='green', linestyle=':', linewidth=1.5, alpha=0.7)
-        ax2.axvline(ring_outer, color='green', linestyle=':', linewidth=1.5, alpha=0.7,
-                   label=f'Région annulaire')
-        
-        ax2.set_xlabel('Rayon (pixels)', fontsize=12)
-        ax2.set_ylabel('Intensité moyenne', fontsize=12)
-        ax2.set_title('Profil radial d\'intensité', fontsize=14)
-        ax2.legend(fontsize=10)
-        ax2.grid(True, alpha=0.3)
-        
-        # --- Plot 3: Image avec ellipse ajustée ---
-        ax3.imshow(image, cmap='gray', vmin=vmin, vmax=vmax, origin='upper')
-        
-        angle_deg = np.degrees(angle)
-        ellipse = Ellipse(
-            xy=(x_c, y_c),
-            width=4*a,  # 2 sigma
-            height=4*b,
-            angle=angle_deg,
-            fill=False,
-            edgecolor='red',
-            linewidth=2,
-            label=f'Ellipse ajustée (a={2*a:.1f}, b={2*b:.1f}px)'
-        )
-        ax3.add_patch(ellipse)
-        
-        # Afficher la région détectée
-        ax3.contour(binary, levels=[0.5], colors='yellow', linewidths=1.5, 
-                   linestyles='--', alpha=0.7)
-        
-        ax3.plot(x_c, y_c, 'g+', markersize=15, markeredgewidth=2,
-                label='Centre recalibré')
-        
-        ax3.set_xlabel('X (pixels)', fontsize=12)
-        ax3.set_ylabel('Y (pixels)', fontsize=12)
-        ax3.set_title('Anneau détecté et ellipse', fontsize=14)
-        ax3.legend(fontsize=10, loc='lower right')
-        ax3.grid(True, alpha=0.3)
-        
-        fig.tight_layout()
-        plt.show()
-    
-    return x_c, y_c
-
 
 def recalibrate_with_beamstop_noponi(image, center_mask_radius=None, threshold_rel=0.5,
-                                           min_size=50, plot=False):
+                                           min_size=50, max_iterations=5, convergence_threshold=1.0,
+                                           initial_center=None, plot=False):
     """
     Recalibrate beam center from a TEM image with beam stop.
-    Simplified and fast version using detection of the most intense ring.
+    Uses an iterative ring detection method for robust center determination.
     
     Method:
-    1. Estimate initial center (max intensity)
-    2. Mask central region to exclude direct beam
-    3. Detect most intense ring via radial profile
-    4. Extract pixels from this ring
-    5. Calculate center by moments
+    1. Estimate initial center (max intensity or user-provided)
+    2. Iteratively:
+       - Mask central region to exclude direct beam
+       - Detect most intense ring via radial profile
+       - Extract pixels from this ring
+       - Calculate center by moments
+       - Check convergence
     
     Parameters
     ----------
@@ -531,6 +384,12 @@ def recalibrate_with_beamstop_noponi(image, center_mask_radius=None, threshold_r
         Relative threshold to extract ring pixels (fraction of max intensity)
     min_size : int
         Minimum size of an object to be considered as a ring
+    max_iterations : int
+        Maximum number of iterations for center refinement (default: 5)
+    convergence_threshold : float
+        Stop iterations when center displacement is below this value in pixels (default: 1.0)
+    initial_center : tuple or None
+        Initial center coordinates as (x, y) in pixels. If None, uses max intensity position (default: None)
     plot : bool
         If True, displays image with detected ellipse (default: False)
     
@@ -542,61 +401,88 @@ def recalibrate_with_beamstop_noponi(image, center_mask_radius=None, threshold_r
         Y coordinate of center in pixels
     """
     
-    # --- Initial center estimation (max intensity) ---
-    y_init, x_init = np.unravel_index(np.argmax(image), image.shape)
+    # --- Initial center estimation ---
+    if initial_center is not None:
+        x_c, y_c = initial_center
+        if plot:
+            print(f"Using user-provided initial center: ({x_c:.1f}, {y_c:.1f})")
+    else:
+        # Use max intensity as initial center
+        y_init, x_init = np.unravel_index(np.argmax(image), image.shape)
+        x_c, y_c = x_init, y_init
+        if plot:
+            print(f"Using max intensity as initial center: ({x_c:.1f}, {y_c:.1f})")
     
     # Define central mask radius if not provided
     if center_mask_radius is None:
         center_mask_radius = min(image.shape) * 0.075
     
-    # --- Create mask to exclude central region ---
-    Y, X = np.ogrid[:image.shape[0], :image.shape[1]]
-    distances = np.sqrt((X - x_init)**2 + (Y - y_init)**2)
-    mask_central = distances > center_mask_radius
+    # --- Iterative refinement ---
+    center_history = [(x_c, y_c)]
+    iteration = 0
+    displacement = float('inf')
     
-    # --- Calculate radial profile to identify most intense ring ---
-    max_radius = int(np.sqrt((image.shape[0]/2)**2 + (image.shape[1]/2)**2))
-    radial_profile = np.zeros(max_radius)
-    radial_counts = np.zeros(max_radius)
+    while displacement >= convergence_threshold and iteration < max_iterations:
+        # --- Create mask to exclude central region ---
+        Y, X = np.ogrid[:image.shape[0], :image.shape[1]]
+        distances = np.sqrt((X - x_c)**2 + (Y - y_c)**2)
+        mask_central = distances > center_mask_radius
+        
+        # --- Calculate radial profile to identify most intense ring ---
+        max_radius = int(np.sqrt((image.shape[0]/2)**2 + (image.shape[1]/2)**2))
+        radial_profile = np.zeros(max_radius)
+        radial_counts = np.zeros(max_radius)
+        
+        for r in range(int(center_mask_radius), max_radius):
+            ring_mask = (distances >= r) & (distances < r + 1)
+            ring_pixels = image[ring_mask]
+            if len(ring_pixels) > 0:
+                radial_profile[r] = np.mean(ring_pixels)
+                radial_counts[r] = len(ring_pixels)
+        
+        # Find most intense peak (main ring)
+        valid_radii = np.where(radial_counts > 0)[0]
+        if len(valid_radii) == 0:
+            raise ValueError("No ring detected. Check center_mask_radius or image.")
+        
+        peak_radius_idx = valid_radii[np.argmax(radial_profile[valid_radii])]
+        peak_intensity = radial_profile[peak_radius_idx]
+        
+        # --- Thresholding to isolate ring around peak ---
+        ring_width = peak_radius_idx * 0.4  # 40% of peak radius
+        ring_inner = max(center_mask_radius, peak_radius_idx - ring_width/2)
+        ring_outer = peak_radius_idx + ring_width/2
+        ring_mask = (distances >= ring_inner) & (distances <= ring_outer)
+        
+        # Intensity thresholding in this annular region
+        thresh = peak_intensity * threshold_rel
+        binary = (image > thresh) & ring_mask
+        binary = morphology.remove_small_objects(binary, min_size=min_size)
+        
+        # --- Extract coordinates and calculate center by moments ---
+        coords = np.column_stack(np.where(binary))
+        if len(coords) == 0:
+            raise ValueError("No pixels detected in ring. Adjust threshold_rel.")
+        
+        y = coords[:, 0]
+        x = coords[:, 1]
+        
+        # Center by intensity-weighted average
+        weights = image[y, x]
+        x_c_new = np.average(x, weights=weights)
+        y_c_new = np.average(y, weights=weights)
+        
+        # Check convergence
+        displacement = np.sqrt((x_c_new - x_c)**2 + (y_c_new - y_c)**2)
+        center_history.append((x_c_new, y_c_new))
+        x_c, y_c = x_c_new, y_c_new
+        iteration += 1
     
-    for r in range(int(center_mask_radius), max_radius):
-        ring_mask = (distances >= r) & (distances < r + 1)
-        ring_pixels = image[ring_mask]
-        if len(ring_pixels) > 0:
-            radial_profile[r] = np.mean(ring_pixels)
-            radial_counts[r] = len(ring_pixels)
-    
-    # Find most intense peak (main ring)
-    valid_radii = np.where(radial_counts > 0)[0]
-    if len(valid_radii) == 0:
-        raise ValueError("No ring detected. Check center_mask_radius or image.")
-    
-    peak_radius_idx = valid_radii[np.argmax(radial_profile[valid_radii])]
-    peak_intensity = radial_profile[peak_radius_idx]
-    
-    # --- Thresholding to isolate ring around peak ---
-    ring_width = peak_radius_idx * 0.4  # 40% of peak radius
-    ring_inner = max(center_mask_radius, peak_radius_idx - ring_width/2)
-    ring_outer = peak_radius_idx + ring_width/2
-    ring_mask = (distances >= ring_inner) & (distances <= ring_outer)
-    
-    # Intensity thresholding in this annular region
-    thresh = peak_intensity * threshold_rel
-    binary = (image > thresh) & ring_mask
-    binary = morphology.remove_small_objects(binary, min_size=min_size)
-    
-    # --- Extract coordinates and calculate center by moments ---
-    coords = np.column_stack(np.where(binary))
-    if len(coords) == 0:
-        raise ValueError("No pixels detected in ring. Adjust threshold_rel.")
-    
-    y = coords[:, 0]
-    x = coords[:, 1]
-    
-    # Center by intensity-weighted average
-    weights = image[y, x]
-    x_c = np.average(x, weights=weights)
-    y_c = np.average(y, weights=weights)
+    if plot:
+        if displacement < convergence_threshold:
+            print(f"Convergence reached after {iteration} iterations (displacement: {displacement:.2f} px)")
+        else:
+            print(f"Max iterations ({max_iterations}) reached. Final displacement: {displacement:.2f} px)")
     
     # --- Ellipse calculation for visualization ---
     cov = np.cov(x - x_c, y - y_c)
@@ -627,15 +513,22 @@ def recalibrate_with_beamstop_noponi(image, center_mask_radius=None, threshold_r
         ax1.add_patch(circle_inner)
         ax1.add_patch(circle_outer)
         
+        # Show center evolution
         ax1.plot(x_init, y_init, 'b+', markersize=15, markeredgewidth=2,
                 label='Initial center (max intensity)')
+        
+        # Plot intermediate centers if multiple iterations
+        if len(center_history) > 2:
+            for i, (x_h, y_h) in enumerate(center_history[1:-1], 1):
+                ax1.plot(x_h, y_h, 'y+', markersize=10, markeredgewidth=1.5, alpha=0.6)
+        
         ax1.plot(x_c, y_c, 'g+', markersize=15, markeredgewidth=2,
-                label='Recalibrated center')
+                label=f'Final center ({len(center_history)-1} iter.)')
         
         ax1.set_xlabel('X (pixels)', fontsize=12)
         ax1.set_ylabel('Y (pixels)', fontsize=12)
         ax1.set_title('Image and search region', fontsize=14)
-        ax1.legend(fontsize=10, loc='upper right')
+        ax1.legend(fontsize=10, loc='lower right')
         ax1.grid(True, alpha=0.3)
         
         # --- Plot 2: Radial profile ---
@@ -674,7 +567,7 @@ def recalibrate_with_beamstop_noponi(image, center_mask_radius=None, threshold_r
         ax3.set_xlabel('X (pixels)', fontsize=12)
         ax3.set_ylabel('Y (pixels)', fontsize=12)
         ax3.set_title('Detected ring and center', fontsize=14)
-        ax3.legend(fontsize=10, loc='upper right')
+        ax3.legend(fontsize=10, loc='lower right')
         ax3.grid(True, alpha=0.3)
         
         fig.tight_layout()
