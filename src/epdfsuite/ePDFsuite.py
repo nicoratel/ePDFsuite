@@ -213,6 +213,10 @@ class SAEDProcessor:
             if hasattr(pdf_interactive, 'save_results'):
                 pdf_interactive.save_results(outputfile)
             pdf_interactive.show()
+            # Store the interactive object for access to results
+            self.pdf_interactive = pdf_interactive
+            # Return a reference to the results that will be updated by sliders
+            return PDFResultsReference(pdf_interactive)
         else:
             print('Compute PDF with default parameters')
             r,G = compute_ePDF(
@@ -220,8 +224,8 @@ class SAEDProcessor:
                 intensity_sample,
                 composition,
                 Iref=intensity_ref if ref_data is not None else None,
-                bgscale=1.0,
-                qmin=1.5,
+                bgscale=0.8,
+                qmin=0.8,
                 qmax=24,
                 qmaxinst=24,
                 rmin=0.0,
@@ -258,6 +262,60 @@ class SAEDProcessor:
             print(f'PDF saved to {outputfile}')
             return r, G
 
+
+
+# ------------------
+# Results Reference Class
+# ------------------
+class PDFResultsReference:
+    """
+    A reference object that allows unpacking of PDF results from interactive mode.
+    
+    This class acts as a wrapper around PDFInteractive, providing access to the
+    most recently computed r and G values through tuple unpacking.
+    
+    Usage:
+        r, g = proc.extract_epdf(interactive=True)
+        # After adjusting sliders, r and g will contain the latest values
+        print(r, g)  # Access the arrays directly
+    """
+    
+    def __init__(self, pdf_interactive):
+        """
+        Initialize with a PDFInteractive instance.
+        
+        Args:
+            pdf_interactive: The PDFInteractive object containing the results
+        """
+        self._pdf_interactive = pdf_interactive
+    
+    def __iter__(self):
+        """
+        Allow tuple unpacking: r, g = reference
+        
+        Returns the latest computed r and G arrays.
+        """
+        if self._pdf_interactive.last_r is None or self._pdf_interactive.last_G is None:
+            print("⚠️ Aucune valeur disponible. Ajustez les paramètres avec les sliders pour générer r et G.")
+            return iter([None, None])
+        return iter([self._pdf_interactive.last_r, self._pdf_interactive.last_G])
+    
+    def __repr__(self):
+        """String representation of the reference."""
+        if self._pdf_interactive.last_r is None:
+            return "PDFResultsReference(no data yet - adjust sliders to compute)"
+        return f"PDFResultsReference(r: {len(self._pdf_interactive.last_r)} points, " \
+               f"r_range=[{self._pdf_interactive.last_r.min():.2f}, {self._pdf_interactive.last_r.max():.2f}] Å)"
+    
+    @property
+    def r(self):
+        """Direct access to r array."""
+        return self._pdf_interactive.last_r
+    
+    @property
+    def g(self):
+        """Direct access to G array."""
+        return self._pdf_interactive.last_G
 
 
 # ------------------
@@ -451,15 +509,16 @@ class PDFInteractive:
         
         Creates a horizontal layout with sliders on the left and plots on the right.
         """
-        ui = self.widgets.HBox([self.sliders, self.plot_output])
-        self.display(ui)
-        
-        # Generate initial plot with default parameter values
+        # Generate initial plot with default parameter values BEFORE displaying UI
+        # This ensures last_r and last_G are immediately available for unpacking
         self.update_plot(
             self.bgscale_slider.value, self.qmin_slider.value,
             self.qmax_slider.value, self.qmaxinst_slider.value,
             self.rpoly_slider.value, self.lorch_checkbox.value
         )
+        
+        ui = self.widgets.HBox([self.sliders, self.plot_output])
+        self.display(ui)
 
 
 def extract_ePDF_from_mutliple_files(dm4_files,
