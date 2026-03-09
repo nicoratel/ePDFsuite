@@ -2,6 +2,7 @@ from .filereader import load_data
 from .recalibration import recalibrate_no_beamstop, recalibrate_with_beamstop, recalibrate_with_beamstop_noponi
 from .pdf_extraction import compute_ePDF
 from pyFAI import load
+import fabio
 from matplotlib import pyplot as plt
 from matplotlib.colors import LogNorm
 import numpy as np
@@ -9,24 +10,42 @@ import hyperspy.api as hs
 
 
 class SAEDProcessor:
-    def __init__(self, dm4_file, poni_file = None,beamstop = True,verbose=False):
+    def __init__(self, dm4_file, poni_file = None, mask=None, verbose=False):
         """
-        Docstring pour __init__
+        Initialize a SAED data processor.
         
-        :param self: Description
-        :param dm4_file: SAED data file in DM4, DM3, tif, tiff format
-        :param poni_file: geometric calibration file in .poni format
-        :param beamstop: Boolean indicating presence of beamstop on the image -> affects recalibration method
+        Parameters
+        ----------
+        dm4_file : str
+            SAED data file in DM4, DM3, tif, tiff format
+        poni_file : str, optional
+            Geometric calibration file in .poni format
+        mask : str, optional
+            Mask file for the image
+        verbose : bool
+            If True, prints metadata information
         """
         self.dm4_file = dm4_file
         self.poni_file = poni_file
-        self.beamstop = beamstop
+        self.beamstop = True
+        self.initial_center = None  # To be set by user after inspection via plot()
         metadata, img = load_data(dm4_file,verbose=verbose)
         self.metadata = metadata
         self.img = img
+        if mask is not None:
+            mask_img = fabio.open(mask)
+            self.mask = mask_img.data
+        else:
+            self.mask = np.zeros_like(self.img)
+        
         if poni_file is not None:
             self.ai = load(poni_file)
             self.use_pyfai=True
+            if mask is not None:
+                mask_img = fabio.open(mask)
+                self.mask = mask_img.data.astype(bool)
+            else:
+                self.mask = np.zeros(self.img.shape, dtype=bool)
         else:
             img = hs.load(dm4_file)
             self.use_pyfai=False
@@ -37,27 +56,50 @@ class SAEDProcessor:
 
 
     def integrate(self, dm4_file=None, npt=2500, initial_center=None, plot=False):
-
+        """
+        Integrate SAED pattern to 1D.
+        
+        Parameters
+        ----------
+        dm4_file : str, optional
+            File to integrate. If None, uses self.dm4_file
+        npt : int
+            Number of points in output
+        initial_center : tuple, optional
+            Initial center (x, y) in pixels. If None, uses self.initial_center
+        plot : bool
+            If True, displays the integrated pattern
+        
+        Returns
+        -------
+        q : array
+            Scattering vector
+        I : array
+            Integrated intensity
+        """
         if dm4_file is None:
             dm4_file = self.dm4_file
+        
+        # Use provided initial_center, or fall back to self.initial_center
+        center = initial_center if initial_center is not None else self.initial_center
 
         if self.use_pyfai:
             # Load the image data for the specified file
             _, img_data = load_data(dm4_file, verbose=False)
             
             if self.beamstop:
-                self.ai = recalibrate_with_beamstop(dm4_file, self.poni_file, initial_center=initial_center) # seek beamcentre
+                self.ai = recalibrate_with_beamstop(dm4_file, self.poni_file, initial_center=center) # seek beamcentre
             else: # recalibrate with beamstop correction
                 self.ai = recalibrate_no_beamstop(dm4_file, self.poni_file)
             
-            q, I = self.ai.integrate1d(img_data, npt, unit="q_A^-1", polarization_factor=0.99)
-
+            q, I = self.ai.integrate1d(img_data, npt, mask = self.mask, unit="q_A^-1", polarization_factor=0.99)
+            
         else: # intégration personnalisée sans pyFAI, pour les cas où il n'y a pas de fichier de calibration ou que les images ont des résolutions différentes
             # Charger l'image
             img = hs.load(dm4_file)
             
             # Recalibrer le centre
-            center_x, center_y = recalibrate_with_beamstop_noponi(img.data, threshold_rel=0.5, min_size=50, initial_center=initial_center, plot=False)
+            center_x, center_y = recalibrate_with_beamstop_noponi(img.data, threshold_rel=0.5, min_size=50, initial_center=center, plot=False)
             
             # Calculer le profil radial
             y, x = np.indices(img.data.shape)
@@ -96,13 +138,23 @@ class SAEDProcessor:
         plt.imshow(self.img/np.max(self.img), cmap=cmap,norm = LogNorm(vmin=10**(vmin), vmax=10**(vmax)))
     
     def plot_recalibrated_image(self, initial_center=None):
+        """
+        Plot the diffraction image with detected center and rings.
+        
+        Parameters
+        ----------
+        initial_center : tuple, optional
+            Initial center (x, y) in pixels. If None, uses self.initial_center
+        """
+        center = initial_center if initial_center is not None else self.initial_center
+        
         if self.use_pyfai:
             if self.beamstop:
-                _ = recalibrate_with_beamstop(self.dm4_file, self.poni_file, initial_center=initial_center, plot=True)
+                _ = recalibrate_with_beamstop(self.dm4_file, self.poni_file, initial_center=center, plot=True)
             else:
                 _ = recalibrate_no_beamstop(self.dm4_file, self.poni_file, plot=True)
         else:
-            _ = recalibrate_with_beamstop_noponi(self.img, initial_center=initial_center, plot=True)
+            _ = recalibrate_with_beamstop_noponi(self.img, initial_center=center, plot=True)
 
     def extract_epdf(self,
                      ref_diffraction_image=None,
@@ -118,7 +170,84 @@ class SAEDProcessor:
                      qmin=1.5,
                      qmax=24,
                      qmaxinst=24,
-                     rpoly=1.4):
+                     rpoly=1.4,
+                     initial_center=None,
+                     initial_center_ref=None):
+        """
+        Extract ePDF from SAED data (legacy method, prefer using extract_epdf function).
+        
+        This method creates a temporary SAEDProcessor for the reference and calls
+        the standalone extract_epdf function.
+        
+        Parameters
+        ----------
+        ref_diffraction_image : str, optional
+            Path to reference diffraction image
+        ref_poni_file : str, optional
+            Path to reference poni file (if different from sample)
+        composition : str
+            Chemical composition
+        rmin, rmax, rstep : float
+            PDF r-range parameters
+        outputfile : str, optional
+            Output filename
+        interactive : bool
+            If True, shows interactive GUI
+        plot : bool
+            If True, plots results (non-interactive mode)
+        bgscale, qmin, qmax, qmaxinst, rpoly : float
+            PDF computation parameters
+        initial_center : tuple, optional
+            Override self.initial_center for this call
+        initial_center_ref : tuple, optional
+            Initial center for reference image
+        
+        Returns
+        -------
+        results : PDFResultsReference or tuple
+            PDF results
+        """
+        # Create reference processor if provided
+        ref_processor = None
+        if ref_diffraction_image is not None:
+            ref_processor = SAEDProcessor(
+                ref_diffraction_image,
+                poni_file=ref_poni_file if ref_poni_file is not None else self.poni_file,
+                beamstop=self.beamstop,
+                verbose=False
+            )
+            # Set initial center for reference
+            if initial_center_ref is not None:
+                ref_processor.initial_center = initial_center_ref
+            elif initial_center is not None:
+                ref_processor.initial_center = initial_center
+        
+        # Temporarily override initial_center if provided
+        original_center = self.initial_center
+        if initial_center is not None:
+            self.initial_center = initial_center
+        
+        try:
+            # Call standalone function
+            return extract_epdf(
+                sample_processor=self,
+                ref_processor=ref_processor,
+                composition=composition,
+                rmin=rmin,
+                rmax=rmax,
+                rstep=rstep,
+                outputfile=outputfile,
+                interactive=interactive,
+                plot=plot,
+                bgscale=bgscale,
+                qmin=qmin,
+                qmax=qmax,
+                qmaxinst=qmaxinst,
+                rpoly=rpoly
+            )
+        finally:
+            # Restore original center
+            self.initial_center = original_center
         # retrive wavelength from metadata
         wavelength = self.metadata['wavelength']
         camera = self.metadata['camera_title']
@@ -154,6 +283,7 @@ class SAEDProcessor:
                     ponifile=self.poni_file,
                     threshold_rel=0.5,
                     min_size=80,
+                    initial_center=initial_center,
                     plot=False
                     )
                 # Store the calibrated ai for future use
@@ -182,6 +312,7 @@ class SAEDProcessor:
                             ponifile=poni_for_ref,
                             threshold_rel=0.5,
                             min_size=80,
+                            initial_center=initial_center_ref if initial_center_ref is not None else initial_center,
                             plot=False
                         )
                 else:
@@ -193,8 +324,8 @@ class SAEDProcessor:
                     npt=2500,
                     unit="q_A^-1")
         else:# no poni file, use custom integration
-            q_sample, intensity_sample = self.integrate(self.dm4_file,plot=False)
-            q_ref, intensity_ref = self.integrate(dm4_file= ref_diffraction_image,plot=False) if ref_data is not None else (None, None)
+            q_sample, intensity_sample = self.integrate(self.dm4_file, initial_center=initial_center, plot=False)
+            q_ref, intensity_ref = self.integrate(dm4_file= ref_diffraction_image, initial_center=initial_center_ref if initial_center_ref is not None else initial_center, plot=False) if ref_data is not None else (None, None)
         
         if outputfile is None:
             # repalce None by default name based on sample image name
@@ -212,6 +343,8 @@ class SAEDProcessor:
                 ref_diffraction_image=ref_diffraction_image if ref_diffraction_image is not None else None,
                 outputfile=outputfile,
                 SAEDProcessor=self,
+                initial_center=initial_center,
+                initial_center_ref=initial_center_ref,
                 xray=False
             )
             # Si une méthode d'export existe, l'appeler ici
@@ -267,6 +400,158 @@ class SAEDProcessor:
             print(f'PDF saved to {outputfile}')
             return r, G
 
+
+
+# ------------------
+# Standalone ePDF extraction function
+# ------------------
+def extract_epdf(sample_processor,
+                 ref_processor=None,
+                 composition='Au',
+                 rmin=0.1,
+                 rmax=50.0,
+                 rstep=0.01,
+                 outputfile=None,
+                 interactive=True,
+                 plot=False,
+                 bgscale=1,
+                 qmin=1.5,
+                 qmax=24,
+                 qmaxinst=24,
+                 rpoly=1.4):
+    """
+    Extract electron pair distribution function (ePDF) from SAED data.
+    
+    This standalone function provides a clean interface for ePDF extraction,
+    treating sample and reference data symmetrically via SAEDProcessor instances.
+    
+    Parameters
+    ----------
+    sample_processor : SAEDProcessor
+        Processor for sample diffraction data. Should have initial_center set if needed.
+    ref_processor : SAEDProcessor, optional
+        Processor for reference/background diffraction data. If None, no background subtraction.
+    composition : str
+        Chemical composition (e.g., 'Au', 'Fe2O3')
+    rmin, rmax, rstep : float
+        PDF r-range parameters (Angstroms)
+    outputfile : str, optional
+        Path to save PDF results. Auto-generated if None.
+    interactive : bool
+        If True, shows interactive parameter adjustment GUI
+    plot : bool
+        If True, plots results in non-interactive mode
+    bgscale, qmin, qmax, qmaxinst, rpoly : float
+        PDF computation parameters
+    
+    Returns
+    -------
+    results : PDFResultsReference or tuple
+        Interactive mode: PDFResultsReference with .r and .g properties
+        Non-interactive mode: tuple (r, G)
+    
+    Examples
+    --------
+    >>> # Setup processors
+    >>> sample = SAEDProcessor('sample.dm4', poni_file='calib.poni')
+    >>> sample.plot()  # Inspect to determine center
+    >>> sample.initial_center = (335, 275)  # Set after inspection
+    >>> 
+    >>> ref = SAEDProcessor('reference.dm4', poni_file='calib.poni')
+    >>> ref.initial_center = (324, 257)
+    >>> 
+    >>> # Extract PDF
+    >>> results = extract_epdf(sample, ref, composition='Au', interactive=True)
+    >>> r, g = results  # Access results
+    """
+    # Integrate sample
+    q_sample, intensity_sample = sample_processor.integrate(plot=False)
+    
+    # Integrate reference if provided
+    if ref_processor is not None:
+        q_ref, intensity_ref = ref_processor.integrate(plot=False)
+    else:
+        q_ref, intensity_ref = None, None
+    
+    # Generate output filename if not provided
+    if outputfile is None:
+        outputfile = sample_processor.dm4_file.split('.')[0] + '_pdf.gr'
+    
+    if interactive:
+        # Create PDFInteractive object
+        pdf_interactive = PDFInteractive(
+            q_sample,
+            intensity_sample,
+            composition=composition,
+            rmin=rmin,
+            rmax=rmax,
+            rstep=rstep,
+            ref_diffraction_image=ref_processor.dm4_file if ref_processor is not None else None,
+            outputfile=outputfile,
+            SAEDProcessor=sample_processor,
+            initial_center=sample_processor.initial_center,
+            initial_center_ref=ref_processor.initial_center if ref_processor is not None else None,
+            xray=False
+        )
+        # Si une méthode d'export existe, l'appeler ici
+        if hasattr(pdf_interactive, 'save_results'):
+            pdf_interactive.save_results(outputfile)
+        pdf_interactive.show()
+        # Store the interactive object for access to results
+        sample_processor.pdf_interactive = pdf_interactive
+        # Return a reference to the results that will be updated by sliders
+        return PDFResultsReference(pdf_interactive)
+    else:
+        print('Compute PDF with given parameters')
+        r, G = compute_ePDF(
+            q_sample,
+            intensity_sample,
+            composition,
+            Iref=intensity_ref if ref_processor is not None else None,
+            bgscale=bgscale,
+            qmin=qmin,
+            qmax=qmax,
+            qmaxinst=qmaxinst,
+            rmin=rmin,
+            rmax=rmax,
+            rstep=rstep,
+            rpoly=rpoly,
+            Lorch=True,
+            plot=plot)
+        
+        # Generate header for .gr file
+        header = '[DEFAULT]\n\nversion = ePDFsuite 1.0\n\n'
+        header += '#input and output specifications\n'
+        header += 'dataformat = q_A \n'
+        header += f'inputfile = {sample_processor.dm4_file}\n'
+        header += f'backgroundfile = {ref_processor.dm4_file if ref_processor is not None else "None"}\n'
+        header += 'outputtype = gr\n\n'
+        header += '#PDF calculation setup\n'
+        header += 'mode = electrons\n'
+        header += f'wavelength = {sample_processor.metadata.get("wavelength", "unknown"):.4f}\n'
+        header += 'twothetazero = 0\n'
+        header += f'composition={composition} \n'
+        header += f'bgscale = {bgscale:.2f} \n'
+        header += f'rpoly = {rpoly:.2f} \n'
+        header += f'qmaxinst = {qmaxinst:.2f}\n'
+        header += f'qmin = {qmin:.2f} \n'
+        header += f'qmax = {qmax:.2f}  \n'
+        header += f'rmin = {rmin:.2f} \n'
+        header += f'rmax = {rmax:.2f} \n'
+        header += f'rstep = {rstep:.2f}\n\n'
+        header += '# End of config --------------------------------------------------------------\n'
+        header += '#### start data\n\n'
+        header += '#S 1 \n'
+        header += '#L r(Å)  G(Å$^{-2}$)\n'
+        
+        # Write output file
+        with open(outputfile, 'w') as f:
+            f.write(header)
+            for ri, Gi in zip(r, G):
+                f.write(f'{ri:.4f}  {Gi:.6f}\n')
+        
+        print(f'PDF saved to {outputfile}')
+        return r, G
 
 
 # ------------------
@@ -344,7 +629,9 @@ class PDFInteractive:
                  rstep=0.01,
                  xray: bool = False,
                  outputfile: str = './pdf_results.csv',
-                 SAEDProcessor=None):
+                 SAEDProcessor=None,
+                 initial_center=None,
+                 initial_center_ref=None):
         """
         Initialize the interactive PDF interface.
         
@@ -358,6 +645,9 @@ class PDFInteractive:
             rstep (float): Step size for r
             xray (bool): If True, use X-ray scattering factors
             outputfile (str): Default output filename for saving results
+            SAEDProcessor: SAEDProcessor instance for metadata access
+            initial_center (tuple): Initial center coordinates as (x, y) in pixels for sample
+            initial_center_ref (tuple): Initial center coordinates as (x, y) in pixels for reference
         """
         # Import widgets here to avoid issues when they're not needed
         import ipywidgets as widgets
@@ -380,9 +670,14 @@ class PDFInteractive:
             self.sample_diffraction_image = None
             self.ref_diffraction_image = None
             self.composition = None
+        
+        # Store initial_center for later use
+        self.initial_center = initial_center
+        self.initial_center_ref = initial_center_ref
+        
         # integrate reference image if provided
         if ref_diffraction_image is not None and SAEDProcessor is not None:
-            _, Iref = SAEDProcessor.integrate(dm4_file=self.ref_diffraction_image, plot=False)
+            _, Iref = SAEDProcessor.integrate(dm4_file=self.ref_diffraction_image, initial_center=initial_center_ref if initial_center_ref is not None else initial_center, plot=False)
         else:
             Iref = None
         
