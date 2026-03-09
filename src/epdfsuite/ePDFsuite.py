@@ -10,13 +10,13 @@ import hyperspy.api as hs
 
 
 class SAEDProcessor:
-    def __init__(self, dm4_file, poni_file = None, mask=None, verbose=False):
+    def __init__(self, image_file, poni_file = None, mask=None, verbose=False):
         """
         Initialize a SAED data processor.
         
         Parameters
         ----------
-        dm4_file : str
+        image_file : str
             SAED data file in DM4, DM3, tif, tiff format
         poni_file : str, optional
             Geometric calibration file in .poni format
@@ -25,11 +25,11 @@ class SAEDProcessor:
         verbose : bool
             If True, prints metadata information
         """
-        self.dm4_file = dm4_file
+        self.dm4_file = image_file
         self.poni_file = poni_file
         self.beamstop = True
         self.initial_center = None  # To be set by user after inspection via plot()
-        metadata, img = load_data(dm4_file,verbose=verbose)
+        metadata, img = load_data(image_file,verbose=verbose)
         self.metadata = metadata
         self.img = img
         if mask is not None:
@@ -47,7 +47,7 @@ class SAEDProcessor:
             else:
                 self.mask = np.zeros(self.img.shape, dtype=bool)
         else:
-            img = hs.load(dm4_file)
+            img = hs.load(image_file)
             self.use_pyfai=False
             self.scale = img.axes_manager[0].scale# in nm/pixel
             self.units = img.axes_manager[0].units
