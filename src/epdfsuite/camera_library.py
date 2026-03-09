@@ -30,4 +30,11 @@ DETECTOR_LIBRARY = {
                      'description': 'Gatan Ultrascan CCD camera',
                      'image_height': 2048,
                      'image_width': 2048,
-                     'pixel_size': 14.0}}
+                     'pixel_size': 14.0},
+                     
+    'K3 IS': {   'aliases': ['k3'],
+                    'binning': 1,
+                    'description': 'Gatan K3 IS direct electron detector',
+                    'image_height': 3456,
+                    'image_width': 3456,
+                    'pixel_size': 5}}
