@@ -10,7 +10,7 @@ import hyperspy.api as hs
 
 
 class SAEDProcessor:
-    def __init__(self, image_file, poni_file = None, mask=None, verbose=False):
+    def __init__(self, image_file, poni_file = None, mask=None, mtf_file=None, verbose=False):
         """
         Initialize a SAED data processor.
         
@@ -52,6 +52,12 @@ class SAEDProcessor:
             self.scale = img.axes_manager[0].scale# in nm/pixel
             self.units = img.axes_manager[0].units
             print(f'scale = {self.scale}, unit = {self.units}')
+        if mtf_file is not None:
+            self.ismtf = True
+            self.q_mtf, self.mtf_values = np.loadtxt(mtf_file, unpack=True)
+        else:
+            self.ismtf = False
+
             
 
 
@@ -121,7 +127,11 @@ class SAEDProcessor:
             if self.units == '1/nm':
                 q /= 10  # Convertir en Å^-1 si les distances sont en nm
 
-
+        # perform mtf correction if mtf data is available
+        if self.ismtf:
+            mtf_interp = np.interp(q, self.q_mtf, self.mtf_values, left=1.0, right=1.0)
+            mask_mtf = mtf_interp > 0.1
+            I[mask_mtf] /= mtf_interp[mask_mtf]
 
         if plot:
             plt.figure()
@@ -131,6 +141,7 @@ class SAEDProcessor:
             plt.title('Azimuthally Integrated SAED Pattern')
             plt.grid()
             plt.show()
+        
         return q, I
     
     def plot(self,vmin=-4, vmax=0,cmap='gray'):
@@ -413,7 +424,6 @@ def extract_epdf(sample_processor,
                  rmax=50.0,
                  rstep=0.01,
                  outputfile=None,
-                 mtf_file=None,
                  interactive=True,
                  plot=False,
                  bgscale=1,
@@ -476,22 +486,6 @@ def extract_epdf(sample_processor,
         q_ref, intensity_ref = None, None
 
 
-    # correct for MTF if mtf_file is provided
-    if mtf_file is not None:
-        q_mtf, mtf_values = np.loadtxt(mtf_file,unpack=True)
-        # Interpolate MTF values to match q_sample points
-        mtf_interp = np.interp(q_sample, q_mtf, mtf_values, left=1.0, right=1.0)
-        # Apply correction only where MTF > 0.1 to avoid noise amplification
-        mask_mtf = mtf_interp > 0.1
-        intensity_sample[mask_mtf] /= mtf_interp[mask_mtf]
-
-        if ref_processor is not None:
-            mtf_interp_ref = np.interp(q_ref, q_mtf, mtf_values, left=1.0, right=1.0)
-            mask_mtf_ref = mtf_interp_ref > 0.1
-            intensity_ref[mask_mtf_ref] /= mtf_interp_ref[mask_mtf_ref]
-
-
-    
     # Generate output filename if not provided
     if outputfile is None:
         outputfile = sample_processor.dm4_file.split('.')[0] + '_pdf.gr'
