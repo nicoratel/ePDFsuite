@@ -166,6 +166,7 @@ class SAEDProcessor:
                      outputfile=None,
                      interactive = True,
                      plot = False,
+                     mtf_file=None,
                      bgscale=1,
                      qmin=1.5,
                      qmax=24,
@@ -412,6 +413,7 @@ def extract_epdf(sample_processor,
                  rmax=50.0,
                  rstep=0.01,
                  outputfile=None,
+                 mtf_file=None,
                  interactive=True,
                  plot=False,
                  bgscale=1,
@@ -472,6 +474,23 @@ def extract_epdf(sample_processor,
         q_ref, intensity_ref = ref_processor.integrate(plot=False)
     else:
         q_ref, intensity_ref = None, None
+
+
+    # correct for MTF if mtf_file is provided
+    if mtf_file is not None:
+        q_mtf, mtf_values = np.loadtxt(mtf_file,unpack=True)
+        # Interpolate MTF values to match q_sample points
+        mtf_interp = np.interp(q_sample, q_mtf, mtf_values, left=1.0, right=1.0)
+        # Apply correction only where MTF > 0.1 to avoid noise amplification
+        mask_mtf = mtf_interp > 0.1
+        intensity_sample[mask_mtf] /= mtf_interp[mask_mtf]
+
+        if ref_processor is not None:
+            mtf_interp_ref = np.interp(q_ref, q_mtf, mtf_values, left=1.0, right=1.0)
+            mask_mtf_ref = mtf_interp_ref > 0.1
+            intensity_ref[mask_mtf_ref] /= mtf_interp_ref[mask_mtf_ref]
+
+
     
     # Generate output filename if not provided
     if outputfile is None:
