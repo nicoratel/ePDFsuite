@@ -54,7 +54,7 @@ class SAEDProcessor:
             print(f'scale = {self.scale}, unit = {self.units}')
         if mtf_file is not None:
             self.ismtf = True
-            self.q_mtf, self.mtf_values = np.loadtxt(mtf_file, unpack=True)
+            self.mtf_file = mtf_file
         else:
             self.ismtf = False
 
@@ -100,6 +100,11 @@ class SAEDProcessor:
             
             q, I = self.ai.integrate1d(img_data, npt, mask = self.mask, unit="q_A^-1", polarization_factor=0.99)
             
+            # perform MTF correction if MTF data is available
+            if self.ismtf:
+                from .utilities import correct_intensity_mtf
+                I = correct_intensity_mtf(q, I, self.poni_file, self.mtf_file)
+
         else: # intégration personnalisée sans pyFAI, pour les cas où il n'y a pas de fichier de calibration ou que les images ont des résolutions différentes
             # Charger l'image
             img = hs.load(dm4_file)
@@ -127,11 +132,7 @@ class SAEDProcessor:
             if self.units == '1/nm':
                 q /= 10  # Convertir en Å^-1 si les distances sont en nm
 
-        # perform mtf correction if mtf data is available
-        if self.ismtf:
-            mtf_interp = np.interp(q, self.q_mtf, self.mtf_values, left=1.0, right=1.0)
-            mask_mtf = mtf_interp > 0.1
-            I[mask_mtf] /= mtf_interp[mask_mtf]
+        
 
         if plot:
             plt.figure()
