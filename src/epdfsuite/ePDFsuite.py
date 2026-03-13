@@ -1,5 +1,5 @@
 from .filereader import load_data
-from .recalibration import recalibrate_no_beamstop, recalibrate_with_beamstop, recalibrate_with_beamstop_noponi
+from .recalibration import recalibrate_with_beamstop, recalibrate_with_beamstop_noponi
 from .pdf_extraction import compute_ePDF
 from pyFAI import load
 import fabio
@@ -27,7 +27,6 @@ class SAEDProcessor:
         """
         self.dm4_file = image_file
         self.poni_file = poni_file
-        self.beamstop = True
         self.initial_center = None  # To be set by user after inspection via plot()
         metadata, img = load_data(image_file,verbose=verbose)
         self.metadata = metadata
@@ -93,10 +92,9 @@ class SAEDProcessor:
             # Load the image data for the specified file
             _, img_data = load_data(dm4_file, verbose=False)
             
-            if self.beamstop:
-                self.ai = recalibrate_with_beamstop(dm4_file, self.poni_file, initial_center=center) # seek beamcentre
-            else: # recalibrate with beamstop correction
-                self.ai = recalibrate_no_beamstop(dm4_file, self.poni_file)
+            
+            self.ai = recalibrate_with_beamstop(dm4_file, self.poni_file, initial_center=center,mask=self.mask) # seek beamcentre
+            
             
             q, I = self.ai.integrate1d(img_data, npt, mask = self.mask, unit="q_A^-1", polarization_factor=0.99)
             
@@ -145,9 +143,21 @@ class SAEDProcessor:
         
         return q, I
     
-    def plot(self,vmin=-4, vmax=0,cmap='gray'):
-        plt.figure()
-        plt.imshow(self.img/np.max(self.img), cmap=cmap,norm = LogNorm(vmin=10**(vmin), vmax=10**(vmax)))
+    def plot(self,vmin=-4, vmax=0,cmap='jet',display_mask=False):
+        if display_mask:
+            plt.figure()
+            # Create a copy of the image for display
+            img_display = self.img.copy() / np.max(self.img)
+            # Set masked pixels to NaN to display them in white
+            img_display[self.mask.astype(bool)] = np.nan
+            plt.imshow(img_display, cmap=cmap, norm=LogNorm(vmin=10**(vmin), vmax=10**(vmax)))
+            # Set NaN color to white
+            current_cmap = plt.get_cmap(cmap).copy()
+            current_cmap.set_bad(color='white')
+            plt.imshow(img_display, cmap=current_cmap, norm=LogNorm(vmin=10**(vmin), vmax=10**(vmax)))
+        else:
+            plt.figure()
+            plt.imshow(self.img/np.max(self.img), cmap=cmap, norm=LogNorm(vmin=10**(vmin), vmax=10**(vmax)))
     
     def plot_recalibrated_image(self, initial_center=None):
         """
@@ -161,10 +171,9 @@ class SAEDProcessor:
         center = initial_center if initial_center is not None else self.initial_center
         
         if self.use_pyfai:
-            if self.beamstop:
-                _ = recalibrate_with_beamstop(self.dm4_file, self.poni_file, initial_center=center, plot=True)
-            else:
-                _ = recalibrate_no_beamstop(self.dm4_file, self.poni_file, plot=True)
+            # Note: The mask display is handled inside recalibrate_with_beamstop
+            _ = recalibrate_with_beamstop(self.dm4_file, self.poni_file, initial_center=center, mask=self.mask, plot=True)
+            
         else:
             _ = recalibrate_with_beamstop_noponi(self.img, initial_center=center, plot=True)
 
@@ -226,7 +235,6 @@ class SAEDProcessor:
             ref_processor = SAEDProcessor(
                 ref_diffraction_image,
                 poni_file=ref_poni_file if ref_poni_file is not None else self.poni_file,
-                beamstop=self.beamstop,
                 verbose=False
             )
             # Set initial center for reference
@@ -285,20 +293,15 @@ class SAEDProcessor:
                 ai = self.ai
             else:
                 # Initialize Azimuthal Integrator from poni file and recalibrate
-                if not self.beamstop:
-                    ai = recalibrate_no_beamstop(
-                    dm4file=sample_diffraction_image,
-                    ponifile=self.poni_file,
-                    )
-                else:
-                    ai = recalibrate_with_beamstop(
-                    dm4file=sample_diffraction_image,
-                    ponifile=self.poni_file,
-                    threshold_rel=0.5,
-                    min_size=80,
-                    initial_center=initial_center,
-                    plot=False
-                    )
+                
+                ai = recalibrate_with_beamstop(
+                dm4file=sample_diffraction_image,
+                ponifile=self.poni_file,
+                threshold_rel=0.5,
+                min_size=80,
+                initial_center=initial_center,
+                plot=False
+                )
                 # Store the calibrated ai for future use
                 self.ai = ai
             
@@ -314,20 +317,15 @@ class SAEDProcessor:
                 if ref_poni_file is not None or ref_data.shape != sample_data.shape:
                     # Recalibrate separately for reference
                     poni_for_ref = ref_poni_file if ref_poni_file is not None else self.poni_file
-                    if not self.beamstop:
-                        ai_ref = recalibrate_no_beamstop(
-                            dm4file=ref_diffraction_image,
-                            ponifile=poni_for_ref
-                        )
-                    else:
-                        ai_ref = recalibrate_with_beamstop(
-                            dm4file=ref_diffraction_image,
-                            ponifile=poni_for_ref,
-                            threshold_rel=0.5,
-                            min_size=80,
-                            initial_center=initial_center_ref if initial_center_ref is not None else initial_center,
-                            plot=False
-                        )
+                    
+                    ai_ref = recalibrate_with_beamstop(
+                        dm4file=ref_diffraction_image,
+                        ponifile=poni_for_ref,
+                        threshold_rel=0.5,
+                        min_size=80,
+                        initial_center=initial_center_ref if initial_center_ref is not None else initial_center,
+                        plot=False
+                    )
                 else:
                     # Use same ai if resolutions match
                     ai_ref = ai
