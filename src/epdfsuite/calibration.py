@@ -3,11 +3,7 @@ from pymatgen.analysis.diffraction.xrd import XRDCalculator
 from .filereader import load_data
 import fabio
 import os
-import numpy as np
-from scipy import ndimage
-from scipy.signal import find_peaks
-import matplotlib.pyplot as plt
-import math
+import sys
 
 def build_calibration_data_from_cif(
     cif_file,
@@ -102,9 +98,8 @@ def perform_geometric_calibration(
 
     print('=' * 70 )
     print('Launching pyFAI-calib2')
-
-    os.system(f'conda run -n epdfpy pyFAI-calib2 -c ./distances.txt {edffile}')
-
+    os.system(f'"{sys.executable}" -m pyFAI.app.calib2 -c ./distances.txt {edffile}')
+    
     # Clean up distance file and edf file
     os.remove(edffile)
     os.remove('./distances.txt')
