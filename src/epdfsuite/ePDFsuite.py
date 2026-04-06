@@ -10,7 +10,16 @@ import hyperspy.api as hs
 
 
 class SAEDProcessor:
-    def __init__(self, image_file, poni_file = None, mask=None, mtf_file=None, verbose=False):
+    def __init__(self,
+                image_file,
+                poni_file = None,
+                mask=None,
+                # deconvolution parameters
+                mtf_file=None,
+                filter = 'rl', # or 'wiener',
+                n_iterations=50, # for rl deconvolution
+                wiener_epsilon=None,
+                verbose=False):
         """
         Initialize a SAED data processor.
         
@@ -22,6 +31,10 @@ class SAEDProcessor:
             Geometric calibration file in .poni format
         mask : str, optional
             Mask file for the image
+        mtf_file : str, optional
+            MTF file for deconvolution by camera MTF
+        wiener_epsilon : float
+            Wiener filter epsilon for MTF deconvolution
         verbose : bool
             If True, prints metadata information
         """
@@ -52,10 +65,16 @@ class SAEDProcessor:
             self.units = img.axes_manager[0].units
             print(f'scale = {self.scale}, unit = {self.units}')
         if mtf_file is not None:
-            self.ismtf = True
-            self.mtf_file = mtf_file
+            self.ismtf = True            
+            from .utilities import deconvolve_mtf_2d, deconvolve_mtf_2d_rl
+            if filter =='wiener':
+                self.img = deconvolve_mtf_2d(self.img, mtf_file, wiener_epsilon=wiener_epsilon)
+            elif filter == 'rl':
+                self.img = deconvolve_mtf_2d_rl(self.img, mtf_file, n_iterations=n_iterations, plot=False)
         else:
             self.ismtf = False
+        # flag to skip recalibration if already done once, to speed up parameter adjustments in interactive mode 
+        self.skip_center_recalibration = False 
 
             
 
@@ -82,43 +101,40 @@ class SAEDProcessor:
         I : array
             Integrated intensity
         """
-        if dm4_file is None:
-            dm4_file = self.dm4_file
+        
+        
         
         # Use provided initial_center, or fall back to self.initial_center
         center = initial_center if initial_center is not None else self.initial_center
-
+        
         if self.use_pyfai:
-            # Load the image data for the specified file
-            _, img_data = load_data(dm4_file, verbose=False)
+            
+            # perform MTF correction if MTF data is available  
+            if not self. skip_center_recalibration:          
+                self.ai = recalibrate_with_beamstop(self.dm4_file, self.poni_file, initial_center=center,mask=self.mask) # seek beamcentre
+            else:
+                pass
+            # integrate using pyFAI with the calibrated ai and mask (self.img is mtf deconvoluted in initialization if mtf_file is provided)
+            q, I = self.ai.integrate1d(self.img, npt, mask = self.mask, unit="q_A^-1", polarization_factor=0.99)
             
             
-            self.ai = recalibrate_with_beamstop(dm4_file, self.poni_file, initial_center=center,mask=self.mask) # seek beamcentre
-            
-            
-            q, I = self.ai.integrate1d(img_data, npt, mask = self.mask, unit="q_A^-1", polarization_factor=0.99)
-            
-            # perform MTF correction if MTF data is available
-            if self.ismtf:
-                from .utilities import correct_intensity_mtf
-                I = correct_intensity_mtf(q, I, self.poni_file, self.mtf_file)
 
         else: # intégration personnalisée sans pyFAI, pour les cas où il n'y a pas de fichier de calibration ou que les images ont des résolutions différentes
-            # Charger l'image
-            img = hs.load(dm4_file)
-            
+                                                        
             # Recalibrer le centre
-            center_x, center_y = recalibrate_with_beamstop_noponi(img.data, threshold_rel=0.5, min_size=50, initial_center=center, plot=False)
-            
+            if not self.skip_center_recalibration:
+                center_x, center_y = recalibrate_with_beamstop_noponi(self.img, threshold_rel=0.5, min_size=50, initial_center=center, plot=False)
+            else:
+                center_x = self.initial_center[0]; center_y = self.initial_center[1]
             # Calculer le profil radial
-            y, x = np.indices(img.data.shape)
+            y, x = np.indices(self.img.shape)
             r = np.sqrt((x - center_x)**2 + (y - center_y)**2)
             
             # Arrondir les distances pour créer des bins
             r_int = r.astype(int)
             
             # Calculer le profil radial (moyenne azimutale)
-            radial_bins = np.bincount(r_int.ravel(), weights=img.data.ravel())
+            radial_bins = np.bincount(r_int.ravel(), weights=self.img.ravel())
             radial_counts = np.bincount(r_int.ravel())
             I = radial_bins / radial_counts
     
@@ -490,20 +506,16 @@ def extract_epdf(sample_processor,
         outputfile = sample_processor.dm4_file.split('.')[0] + '_pdf.gr'
     
     if interactive:
-        # Create PDFInteractive object
+        # Création de l'objet PDFInteractive avec la nouvelle interface
         pdf_interactive = PDFInteractive(
-            q_sample,
-            intensity_sample,
+            sample_processor,
+            ref_processor=ref_processor,
             composition=composition,
             rmin=rmin,
             rmax=rmax,
             rstep=rstep,
-            ref_diffraction_image=ref_processor.dm4_file if ref_processor is not None else None,
-            outputfile=outputfile,
-            SAEDProcessor=sample_processor,
-            initial_center=sample_processor.initial_center,
-            initial_center_ref=ref_processor.initial_center if ref_processor is not None else None,
-            xray=False
+            xray=False,
+            outputfile=outputfile
         )
         # Si une méthode d'export existe, l'appeler ici
         if hasattr(pdf_interactive, 'save_results'):
@@ -627,81 +639,61 @@ class PDFInteractive:
     """
     Interactive widget-based interface for PDF parameter optimization.
     
-    This class provides real-time parameter adjustment with immediate visual feedback,
-    making it easier to optimize PDF processing parameters interactively.
-    """
     
+    """
+
     def __init__(self,
-                 q,
-                 Iexp,
-                 composition,
-                 ref_diffraction_image=None,
+                 sample_processor,
+                 ref_processor=None,
+                 composition='Au',
                  rmin=0,
                  rmax=50,
                  rstep=0.01,
                  xray: bool = False,
-                 outputfile: str = './pdf_results.csv',
-                 SAEDProcessor=None,
-                 initial_center=None,
-                 initial_center_ref=None):
+                 outputfile: str = './pdf_results.csv'):
         """
-        Initialize the interactive PDF interface.
-        
+        Initialise l'interface interactive PDF à partir de deux SAEDProcessor.
         Args:
-            q (array): Scattering vector values
-            Iexp (array): Experimental intensity data
-            composition (str): Chemical formula
-            Iref (array, optional): Reference background
-            rmin (float): Minimum r for PDF
-            rmax (float): Maximum r for PDF
-            rstep (float): Step size for r
-            xray (bool): If True, use X-ray scattering factors
-            outputfile (str): Default output filename for saving results
-            SAEDProcessor: SAEDProcessor instance for metadata access
-            initial_center (tuple): Initial center coordinates as (x, y) in pixels for sample
-            initial_center_ref (tuple): Initial center coordinates as (x, y) in pixels for reference
+            sample_processor (SAEDProcessor): instance pour le signal
+            ref_processor (SAEDProcessor, optionnel): instance pour le fond
+            composition (str): formule chimique
+            rmin, rmax, rstep (float): paramètres PDF
+            xray (bool): X-ray scattering factors
+            outputfile (str): nom du fichier de sortie
         """
-        # Import widgets here to avoid issues when they're not needed
         import ipywidgets as widgets
         from IPython.display import display
-        # Store widgets reference for use in the class
+
         self.widgets = widgets
         self.display = display
-        
-        print('Adjust sliders to optimize PDF parameters. Click "Save" to export results.')
-        # Retrieve useful metadata from SAEDProcessor if provided
-        if SAEDProcessor is not None:
-            self.wavelength = SAEDProcessor.metadata.get('wavelength', None)
-            self.camera = SAEDProcessor.metadata.get('camera_title', None)
-            self.sample_diffraction_image = SAEDProcessor.dm4_file
-            self.ref_diffraction_image = ref_diffraction_image if ref_diffraction_image is not None else None
-            self.composition = composition
-        else:
-            self.wavelength = None
-            self.camera = None
-            self.sample_diffraction_image = None
-            self.ref_diffraction_image = None
-            self.composition = None
-        
-        # Store initial_center for later use
-        self.initial_center = initial_center
-        self.initial_center_ref = initial_center_ref
-        
-        # integrate reference image if provided
-        if ref_diffraction_image is not None and SAEDProcessor is not None:
-            _, Iref = SAEDProcessor.integrate(dm4_file=self.ref_diffraction_image, initial_center=initial_center_ref if initial_center_ref is not None else initial_center, plot=False)
+
+        print('Slide cursors to ajdust parameters values. Click "Save" to export results.')
+
+        # Stocker les processeurs pour accès ultérieur
+        self.sample_processor = sample_processor
+        self.ref_processor = ref_processor
+        self.composition = composition
+
+        # Intégration des données (sample et ref)
+        q, Iexp = sample_processor.integrate(plot=False)
+        if ref_processor is not None:
+            _, Iref = ref_processor.integrate(plot=False)
         else:
             Iref = None
-        
-        # Store PDF computation parameters
 
+        # Métadonnées utiles
+        self.wavelength = getattr(sample_processor, 'wavelength', None)
+        self.camera = getattr(sample_processor, 'camera_title', None)
+        self.sample_diffraction_image = getattr(sample_processor, 'dm4_file', None)
+        self.ref_diffraction_image = getattr(ref_processor, 'dm4_file', None) if ref_processor is not None else None
+
+        # PDF config
         self.xray = xray
         self.pdf_config = dict(
             q=q, Iexp=Iexp, Iref=Iref, composition=composition,
             rmin=rmin, rmax=rmax, rstep=rstep,
         )
-        
-        # Storage for last computed results (for saving)
+
         self.last_r = None
         self.last_G = None
 
@@ -796,7 +788,7 @@ class PDFInteractive:
         header += 'outputtype = gr\n\n'
         header += '#PDF calculation setup\n'
         header += 'mode = electrons\n'        
-        header +=f'wavelength = {self.wavelength:.4f}\n'
+        header +=f'wavelength = {self.sample_processor.metadata.get("wavelength", "unknown"):.4f}\n'
         header += 'twothetazero = 0\n'        
         header +=f'composition={self.composition} \n'
         header +=f'bgscale = {1:.2f} \n'
@@ -812,7 +804,7 @@ class PDFInteractive:
         header += '#L r(Å)  G(Å$^{-2}$)'
 
         np.savetxt(outputfile, np.column_stack((self.last_r, self.last_G)),header=header,delimiter=' ',comments='')
-        
+        print(f'PDF saved to {outputfile}')
         
 
     def show(self):

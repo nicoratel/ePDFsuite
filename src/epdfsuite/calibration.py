@@ -62,19 +62,25 @@ def build_calibration_data_from_cif(
 
 def perform_geometric_calibration(
         cif_file: str,
-        image_file: str):
+        image_file: str,
+        mtf_file: str = None):
     """
-    Docstring pour perform_geometric_calibration
+    Perform geometric calibration of electron diffraction data using pyFAI-calib2.
     
     :param cif_file: Path to cif structure file for calibrant
         :type cif_file: str
-    :param dm4_file: Path to dm4 file for calibrant diffraction data
-        :type dm4_file: str
+    :param image_file: Path to image file for calibrant diffraction data
+        :type image_file: str
+    :param mtf_file: Optional path to MTF file for deconvolution during calibration
+        :type mtf_file: str, optional
     """
     
     # load data and metadata
     detector_info, raw_image = load_data(image_file)
-
+    if mtf_file is not None:
+        # apply MTF deconvolution to raw image
+        from .utilities import deconvolve_mtf_2d_rl
+        raw_image = deconvolve_mtf_2d_rl(raw_image, mtf_file)
     # Define output EDF file name
     edffile = image_file.replace('.dm4', '.edf')
 
