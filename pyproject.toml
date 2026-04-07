@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ePDFsuite"
-version = "0.1.0"
+version = "0.1.4"
 description = "Python toolkit for electron pair distribution function (ePDF) analysis from SAED data"
 authors = [{name = "Nicolas Ratel-Ramond"}]
 readme = "README.md"
@@ -46,6 +46,9 @@ Homepage = "https://github.com/nicoratel/ePDFsuite"
 Documentation = "https://github.com/nicoratel/ePDFsuite/wiki"
 Repository = "https://github.com/nicoratel/ePDFsuite"
 Issues = "https://github.com/nicoratel/ePDFsuite/issues"
+
+[project.scripts]
+epdfsuite-app = "epdfsuite._launcher:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
