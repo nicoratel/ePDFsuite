@@ -38,8 +38,8 @@ git clone https://github.com/nicoratel/ePDFsuite.git
 cd ePDFsuite
 
 # Create and activate a conda environment
-conda create -n epdfpy python=3.10
-conda activate epdfpy
+conda create -n epdfsuite python=3.10
+conda activate epdfsuite
 
 # Install in editable mode
 pip install -e .
@@ -52,7 +52,7 @@ pip install -e .
 Once installed, launch the interactive Streamlit application from anywhere:
 
 ```bash
-conda activate epdfpy
+conda activate epdfsuite
 epdfsuite-app
 ```
 
@@ -239,4 +239,3 @@ MIT License — see [LICENSE](LICENSE) for details.
 
 Nicolas Ratel-Ramond  
 [github.com/nicoratel/ePDFsuite](https://github.com/nicoratel/ePDFsuite)
-
