@@ -110,7 +110,7 @@ class SAEDProcessor:
         if self.use_pyfai:
             
             # perform MTF correction if MTF data is available  
-            if not self. skip_center_recalibration:          
+            if not self.skip_center_recalibration:          
                 self.ai = recalibrate_with_beamstop(self.dm4_file, self.poni_file, initial_center=center,mask=self.mask) # seek beamcentre
             else:
                 pass
