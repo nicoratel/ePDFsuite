@@ -34,5 +34,5 @@ Camera calibration
 
 MTF correction requires a pre-measured MTF file (``.mtf``).
 See the `calibration guide on GitHub
-<https://github.com/nicoratel/ePDFsuite/Camera_Calibration_readME.md>`_
+<https://github.com/nicoratel/ePDFsuite/blob/main/Camera_Calibration_readME.md>`_
 for instructions on measuring the MTF with the slanted-edge method.
