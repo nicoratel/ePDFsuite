@@ -22,43 +22,54 @@ def recalibrate_with_beamstop(dm4file, ponifile, center_mask_radius=None, thresh
                               initial_center=None, output_ponifile=None, plot=False, npt=500,
                               mask=None):
     """
-    Recalibrate beam center from a TEM image with beam stop using PyFAI integration.
-    Uses an iterative ring detection method with PyFAI's azimuthal integration.
-    
+    Recalibrate the beam centre from a TEM image with beam stop using pyFAI.
+
+    Iteratively finds the diffraction ring with the highest intensity,
+    thresholds pixels belonging to that ring, and shifts the beam centre
+    by intensity-weighted moments until convergence or the maximum number
+    of iterations is reached.  The returned pyFAI
+    :class:`~pyFAI.azimuthalIntegrator.AzimuthalIntegrator` has
+    ``poni1``/``poni2`` updated to the refined centre.
+
     Parameters
     ----------
     dm4file : str
-        Path to DM4 file containing TEM image
+        Path to the DM4/DM3/tif image file.
     ponifile : str
-        Path to initial poni file
-    center_mask_radius : float or None
-        Radius of central mask in pixels to exclude central scattering.
-        If None, automatically calculated (7.5% of min image size)
-    threshold_rel : float
-        Relative threshold to extract ring pixels (fraction of max intensity)
-    min_size : int
-        Minimum size of an object to be considered as a ring
-    max_iterations : int
-        Maximum number of iterations for center refinement (default: 5)
-    convergence_threshold : float
-        Stop iterations when center displacement is below this value in pixels (default: 1.0)
-    initial_center : tuple or None
-        Initial center coordinates as (x, y) in pixels. If None, uses max intensity position (default: None)
-    output_ponifile : str
-        Path to save updated poni file (optional)
-    plot : bool
-        If True, displays image with detected ellipse and corrected center (default: False)
-    npt : int
-        Number of points for radial integration with PyFAI (default: 500)
-    mask : ndarray or None
-        Mask array with same shape as image. 
-        Mask convention: 0=valid, 1=masked (invalid pixels). 
-        Will be combined with beamstop mask (optional)
-    
+        Path to the initial pyFAI ``.poni`` calibration file.
+    center_mask_radius : float or None, optional
+        Radius in pixels of the central mask used to exclude the direct
+        beam.  Computed automatically as 7.5 % of the smallest image
+        dimension if ``None``.
+    threshold_rel : float, optional
+        Fraction of the peak ring intensity used as the binarisation
+        threshold. Default is 0.5.
+    min_size : int, optional
+        Minimum connected-component size (pixels) to be kept as a ring
+        candidate. Default is 50.
+    max_iterations : int, optional
+        Maximum number of refinement iterations. Default is 5.
+    convergence_threshold : float, optional
+        Iteration stops when the centre displacement falls below this
+        value in pixels. Default is 1.0.
+    initial_center : tuple of float or None, optional
+        Starting centre ``(x, y)`` in pixels.  Uses the position of
+        maximum intensity if ``None``.
+    output_ponifile : str, optional
+        If provided, the updated ``.poni`` file is written to this path.
+    plot : bool, optional
+        If ``True``, display the image with the detected ring and final
+        centre. Default is ``False``.
+    npt : int, optional
+        Number of radial bins for the pyFAI integration. Default is 500.
+    mask : ndarray or None, optional
+        Boolean mask with the same shape as the image (``True`` = masked).
+        Combined with the beamstop mask internally.
+
     Returns
     -------
     ai_updated : AzimuthalIntegrator
-        pyFAI azimuthal integrator updated with recalibrated center
+        pyFAI azimuthal integrator with the recalibrated beam centre.
     """
 
     # --- Load image ---
@@ -301,44 +312,46 @@ def recalibrate_with_beamstop_noponi(image, center_mask_radius=None, threshold_r
                                            min_size=50, max_iterations=5, convergence_threshold=1.0,
                                            initial_center=None, plot=False):
     """
-    Recalibrate beam center from a TEM image with beam stop.
-    Uses an iterative ring detection method for robust center determination.
-    
-    Method:
-    1. Estimate initial center (max intensity or user-provided)
-    2. Iteratively:
-       - Mask central region to exclude direct beam
-       - Detect most intense ring via radial profile
-       - Extract pixels from this ring
-       - Calculate center by moments
-       - Check convergence
-    
+    Recalibrate the beam centre from a TEM image with beam stop (no PONI file).
+
+    Uses an iterative ring detection approach:
+
+    1. Estimate the initial centre from the maximum intensity or a user-supplied value.
+    2. Mask the central region to exclude the direct beam.
+    3. Detect the most intense diffraction ring via a radial profile.
+    4. Threshold pixels belonging to that ring and compute an intensity-weighted centroid.
+    5. Repeat until convergence or ``max_iterations`` is reached.
+
     Parameters
     ----------
     image : ndarray
-        TEM image as 2D numpy array
-    center_mask_radius : float or None
-        Radius of central mask in pixels to exclude central scattering.
-        If None, automatically calculated (7.5% of min image size)
-    threshold_rel : float
-        Relative threshold to extract ring pixels (fraction of max intensity)
-    min_size : int
-        Minimum size of an object to be considered as a ring
-    max_iterations : int
-        Maximum number of iterations for center refinement (default: 5)
-    convergence_threshold : float
-        Stop iterations when center displacement is below this value in pixels (default: 1.0)
-    initial_center : tuple or None
-        Initial center coordinates as (x, y) in pixels. If None, uses max intensity position (default: None)
-    plot : bool
-        If True, displays image with detected ellipse (default: False)
-    
+        TEM image as a 2D numpy array.
+    center_mask_radius : float or None, optional
+        Radius in pixels of the central mask excluding direct beam scattering.
+        Computed automatically as 7.5 % of the smallest image dimension if ``None``.
+    threshold_rel : float, optional
+        Fraction of peak ring intensity used for binarisation. Default is 0.5.
+    min_size : int, optional
+        Minimum connected-component size (pixels) to keep as a ring candidate.
+        Default is 50.
+    max_iterations : int, optional
+        Maximum number of refinement iterations. Default is 5.
+    convergence_threshold : float, optional
+        Stop when the centre displacement falls below this value in pixels.
+        Default is 1.0.
+    initial_center : tuple of float or None, optional
+        Starting centre ``(x, y)`` in pixels.
+        Uses the position of maximum intensity if ``None``.
+    plot : bool, optional
+        If ``True``, display the image with the detected ring and final centre.
+        Default is ``False``.
+
     Returns
     -------
     x_c : float
-        X coordinate of center in pixels
+        X coordinate of the beam centre in pixels.
     y_c : float
-        Y coordinate of center in pixels
+        Y coordinate of the beam centre in pixels.
     """
     
     # --- Initial center estimation ---

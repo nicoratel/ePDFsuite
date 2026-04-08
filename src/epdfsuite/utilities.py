@@ -14,6 +14,18 @@ import shutil
 
 
 def draw_mask(dm4_image):
+    """
+    Launch the pyFAI-drawmask GUI to interactively draw a pixel mask.
+
+    The input DM4 image is temporarily exported as an EDF file, passed to
+    the ``pyFAI-drawmask`` tool, then the EDF file is deleted. The mask
+    produced by the GUI is saved alongside the image by pyFAI.
+
+    Parameters
+    ----------
+    dm4_image : str
+        Path to the DM4 image file.
+    """
     # load data and metadata
     detector_info, raw_image = load_data(dm4_image)
 
@@ -31,15 +43,39 @@ def draw_mask(dm4_image):
 def detect_edge_angle_hough(edge_data, sigma=1, erosion_px=10,
                             num_peaks=5, plot=False):
     """
-    Edge angle detection using the standard Hough transform.
+    Detect the dominant straight edge in an image using the Hough transform.
+
+    The pipeline is: normalise → erode NaN mask → Canny edge detection →
+    standard Hough transform (0.05° angular resolution) → extract dominant peak.
 
     Parameters
     ----------
-    edge_data   : masked 2D image
-    sigma       : smoothing parameter for Canny edge detection (1–2 for quasi-binary images)
-    erosion_px  : numbers of pixels to crop from the edges of the NaN mask (to avoid artefacts)
-    num_peaks   : number of peaks to extract from the Hough accumulator (default=5)
-    plot        : whether to display debug plots (default=False)
+    edge_data : ndarray
+        2D image, possibly with NaN pixels marking invalid regions.
+    sigma : float, optional
+        Gaussian smoothing sigma passed to the Canny detector. Default is 1.
+        Use 1–2 for quasi-binary (beamstop/background) images.
+    erosion_px : int, optional
+        Number of pixels to erode from the border of the valid mask before
+        running Canny, to avoid false edges at mask boundaries. Default is 10.
+    num_peaks : int, optional
+        Maximum number of peaks to extract from the Hough accumulator.
+        Only the strongest peak is used. Default is 5.
+    plot : bool, optional
+        If ``True``, display diagnostic plots of the masked image, Canny edges,
+        and the Hough accumulator. Default is ``False``.
+
+    Returns
+    -------
+    line_angle_rad : float
+        Angle of the detected edge line with respect to the horizontal, in radians.
+    line_angle_deg : float
+        Same angle in degrees.
+    edge_point : tuple of float
+        ``(x, y)`` coordinates of the point on the line at mid-image height.
+    edge_line : tuple
+        ``(theta, rho, line_angle_deg)`` — Hough normal angle (rad), signed
+        distance from origin (px), and line angle (deg).
     """
     arr = edge_data.astype(float)
     valid = ~np.isnan(arr)
@@ -224,11 +260,7 @@ def compute_mtf_slanted_edge(image_path,
     #    → signed distance: d(x,y) = x·cos(θ) + y·sin(θ) − ρ
     #    (sign encodes which side of the edge the pixel lies on)
     # ------------------------------------------------------------------
-    """
-    ny, nx = image.shape
-    y_idx, x_idx = np.indices((ny, nx))
-    d = x_idx * np.cos(theta_hough) + y_idx * np.sin(theta_hough) - rho_hough
-    """
+    
     ny, nx = image.shape
     y_idx, x_idx = np.indices((ny, nx))
 
@@ -238,8 +270,10 @@ def compute_mtf_slanted_edge(image_path,
                 - rho_hough)
     d = d_raw - d_offset
     # ------------------------------------------------------------------
-    # 3b. Adapt roi_half_width to the available valid pixels on each side
-    #     to enforce a symmetric ESF around the edge
+    # 3b. Adapt ROI bounds independently on each side of the edge.
+    #     No symmetry is required: the ESF is normalised to [0,1] so
+    #     each side only needs enough pixels to establish its plateau.
+    #     The beamstop side can be much narrower than the bright side.
     # ------------------------------------------------------------------
     valid = ~np.isnan(image)
 
@@ -247,17 +281,19 @@ def compute_mtf_slanted_edge(image_path,
     d_pos_max = d[valid & (d > 0)].max() if (valid & (d > 0)).any() else roi_half_width
     d_neg_max = np.abs(d[valid & (d < 0)].min()) if (valid & (d < 0)).any() else roi_half_width
 
-    # Symmetric half-width = smallest of: user setting, available left, available right
-    roi_half_width_eff = min(roi_half_width, d_pos_max, d_neg_max)
-    print(f"[INFO] Effective ROI half-width: {roi_half_width_eff:.1f} px "
-        f"(left={d_neg_max:.1f}, right={d_pos_max:.1f})")
+    # Independent limits: use as much as available up to roi_half_width
+    d_pos_lim = min(roi_half_width, d_pos_max)   # bright side
+    d_neg_lim = min(roi_half_width, d_neg_max)   # dark (beamstop) side
 
-    roi = np.abs(d) < roi_half_width_eff   # symmetric ROI
+    print(f"[INFO] Asymmetric ROI: dark side={d_neg_lim:.1f} px, "
+          f"bright side={d_pos_lim:.1f} px "
+          f"(available: left={d_neg_max:.1f}, right={d_pos_max:.1f})")
+
     # ------------------------------------------------------------------
-    # 4. Select pixels inside the ROI band around the edge
+    # 4. Select pixels inside the asymmetric ROI band around the edge
     # ------------------------------------------------------------------
     valid = ~np.isnan(image)
-    roi = np.abs(d) < roi_half_width
+    roi = (d > -d_neg_lim) & (d < d_pos_lim)
     valid_roi = valid & roi
 
     d_vals = d[valid_roi]
@@ -407,7 +443,7 @@ def compute_mtf_slanted_edge(image_path,
             y_line = np.array([0, ny - 1])
         axes[0, 0].plot(x_line, y_line, 'r-', lw=2,
                         label=f'Edge {edge_angle_deg:.2f}°')
-        axes[0, 0].contour(np.abs(d) < roi_half_width, levels=[0.5],
+        axes[0, 0].contour((d > -d_neg_lim) & (d < d_pos_lim), levels=[0.5],
                            colors='cyan', linewidths=1, linestyles='--')
         axes[0, 0].set_title('Image + detected edge (red) + ROI (cyan)')
         axes[0, 0].legend(fontsize=8)
@@ -469,10 +505,31 @@ def compute_mtf_slanted_edge(image_path,
 
 def estimate_wiener_epsilon_spectral(noise_patch, signal_patch, subtract_noise=True):
     """
-    Estimate wiener_epsilon as the ratio of the power spectral densities (PSD) of noise and signal.
-    noise_patch : sub-image 2D corresponding to noise (beamstop)
-    signal_patch : sub-image 2D corresponding to signal
-    subtract_noise : if True, subtract the mean of the noise from the signal before calculation
+    Estimate the Wiener regularisation parameter epsilon from image data.
+
+    Computes epsilon as the square root of the ratio of the mean power spectral
+    densities (PSD) of the noise and signal patches:
+    ``epsilon = sqrt( <|N(f)|²> / <|S(f)|²> )``
+
+    This estimate is used to set the noise-to-signal power ratio in the Wiener
+    filter: ``W(f) = MTF / (MTF² + epsilon²)``.
+
+    Parameters
+    ----------
+    noise_patch : ndarray
+        2D (or 1D) sub-image extracted from the beamstop region (dark, noisy side).
+    signal_patch : ndarray
+        2D (or 1D) sub-image extracted from the bright background region.
+    subtract_noise : bool, optional
+        If ``True`` (default), subtract the mean of ``noise_patch`` from
+        ``signal_patch`` before computing the signal PSD, to account for
+        any DC offset in the background.
+
+    Returns
+    -------
+    epsilon : float
+        Estimated noise-to-signal PSD ratio, suitable for use as ``wiener_epsilon``
+        in :func:`deconvolve_mtf_2d`.
     """
     # Centre signals
     noise = noise_patch - np.nanmean(noise_patch)
@@ -502,9 +559,35 @@ def estimate_wiener_epsilon_spectral(noise_patch, signal_patch, subtract_noise=T
 
 def extract_noise_and_signal_patches(image, edge_line, band_width=500, noise_box=None, erosion_px=5):
     """
-    Extract two 2D sub-images:
-      - signal_patch : rectangular band centred on the edge (background side)
-      - noise_patch  : rectangular band on the beamstop side (noise)
+    Extract noise and signal pixel patches on each side of the detected edge.
+
+    The image is split along the Hough line into two regions:
+    - **signal patch** (bright side, ``d > +erosion_px``): background pixels.
+    - **noise patch** (dark side, ``d < -erosion_px``): beamstop pixels.
+
+    An erosion band of ``erosion_px`` pixels around the edge is excluded from
+    both patches to avoid contamination by the edge transition itself.
+    Diagnostic plots are displayed showing the two zones.
+
+    Parameters
+    ----------
+    image : ndarray
+        2D image, with NaN for masked/invalid pixels.
+    edge_line : tuple
+        ``(theta, rho, angle_deg)`` as returned by :func:`detect_edge_angle_hough`.
+    band_width : float, optional
+        Total width of the extraction band centred on the edge (pixels). Default is 500.
+    noise_box : ignored
+        Reserved for future use.
+    erosion_px : int, optional
+        Width of the exclusion zone on each side of the edge (pixels). Default is 5.
+
+    Returns
+    -------
+    signal_patch : ndarray
+        1D array of pixel values from the bright (background) side.
+    noise_patch : ndarray
+        1D array of pixel values from the dark (beamstop) side.
     """
     theta, rho, _ = edge_line
     ny, nx = image.shape
@@ -577,31 +660,49 @@ def deconvolve_mtf_2d(image, mtf_file, clip=True,
                        rolloff_order=4,
                        plot=False):
     """
-    image : 2D array - image to be deconvoluted
-    mtf_file : path to mtf file - 3 columns, text format (freq, MTF, epsilon)
-    clip : bool - if True, negative values in the deconvoluted image are set to 0
-    wiener_epsilon : float or None - if None, epsilon is extracted from mtf file
-    min_epsilon : float - minimum allowed value for epsilon to avoid instability
-    pre_smooth_sigma : float, default=0.5
-        Gaussian pre-smoothing sigma (pixels) applied BEFORE deconvolution.
-        Reduces Poisson noise amplification at the cost of slight blurring.
-        Recommended: 0.5–1.0 for noisy diffraction images.
-    use_rolloff : bool, default=True
-        Apply a roll-off window to the Wiener filter to suppress noise
-        amplification at high spatial frequencies.
-    u_cutoff : float, default=0.4
-        Roll-off cutoff frequency (cycles/pixel), max=0.5 (Nyquist).
-        If None, automatically set to the frequency where MTF = epsilon
-        (i.e. MTF10 if epsilon=0.1), which is the frequency above which
-        the Wiener filter starts amplifying noise significantly.
-    rolloff_window : str, default='tukey'
-        Roll-off window type: 'hann', 'butterworth', or 'tukey'.
-    rolloff_alpha : float, default=0.5
-        For Tukey window: fraction of the flat plateau (0=Hann, 1=no rolloff).
-    rolloff_order : int, default=4
-        For Butterworth window: filter order (higher = steeper cutoff).
-    plot : bool, default=False
-        Display the Wiener filter profile.
+    Wiener 2D MTF deconvolution with optional high-frequency roll-off.
+
+    Applies a Wiener filter built from a radially symmetric MTF to restore
+    spatial frequencies attenuated by the detector. An optional roll-off
+    window suppresses noise amplification at high frequencies.
+
+    Parameters
+    ----------
+    image : ndarray
+        2D image to deconvolve.
+    mtf_file : str
+        Path to the MTF file (3-column text: freq (cyc/px), MTF, epsilon).
+    clip : bool, optional
+        If ``True`` (default), clip negative values in the output to zero.
+    wiener_epsilon : float or None, optional
+        Regularisation parameter. If ``None``, read from column 3 of
+        ``mtf_file`` (floored at ``min_epsilon``).
+    min_epsilon : float, optional
+        Minimum allowed epsilon to prevent filter instability. Default is 0.005.
+    pre_smooth_sigma : float, optional
+        Sigma (pixels) of Gaussian pre-smoothing applied before deconvolution
+        to reduce Poisson noise amplification. Default is 0.5. Set to 0 to disable.
+    use_rolloff : bool, optional
+        If ``True`` (default), multiply the Wiener filter by a roll-off window
+        to suppress noise at frequencies above ``u_cutoff``.
+    u_cutoff : float or None, optional
+        Roll-off cutoff frequency in cycles/pixel (max 0.5 = Nyquist). If
+        ``None``, automatically set to the frequency where ``MTF = epsilon``.
+        Default is 0.4.
+    rolloff_window : {'tukey', 'hann', 'butterworth'}, optional
+        Shape of the roll-off window. Default is ``'tukey'``.
+    rolloff_alpha : float, optional
+        For the Tukey window: fraction of the passband that is flat
+        (0 = Hann, 1 = rectangular). Default is 0.5.
+    rolloff_order : int, optional
+        For the Butterworth window: filter order (higher = steeper). Default is 4.
+    plot : bool, optional
+        If ``True``, display the Wiener filter profile. Default is ``False``.
+
+    Returns
+    -------
+    image_deconv : ndarray
+        Deconvolved image, same shape as ``image``. NaN pixels are preserved.
     """
 
     # ------------------------------------------------------------------
@@ -772,37 +873,44 @@ def deconvolve_mtf_2d_rl(image, mtf_file, clip=True,
                           verbose=False,
                           plot=False):
     """
-    Richardson-Lucy 2D deconvolution with radial MTF.
+    Richardson-Lucy 2D deconvolution with a radial MTF.
 
-    Suited to Poisson noise (electron/photon counting), iterative.
-    Regularisation is implicit: too few iterations under-deconvolves,
-    too many amplifies noise.
+    Suited to Poisson noise (electron/photon counting). Regularisation is
+    implicit: too few iterations under-deconvolves; too many amplify noise.
 
-    Stopping criterion — relative change of the estimate u:
-        rel = ||u^(k+1) - u^(k)||_∞ / ||u^(k)||_∞  < tol
-    This criterion is noise-model-agnostic and detects both
-    convergence (rel → 0) and divergence (rel grows).
+    The stopping criterion is the relative change of the current estimate *u*:
 
-    Note: the Morozov discrepancy principle (chi²/pixel = 1) assumes
-    data in raw Poisson count units. For normalised/calibrated images
-    (e.g. ePDF), it is not directly applicable.
+    .. math::
+
+        \\text{rel} = \\frac{\\|u^{(k+1)} - u^{(k)}\\|_\\infty}{\\|u^{(k)}\\|_\\infty} < \\text{tol}
 
     Parameters
     ----------
-    image           : 2D array  - image to deconvolve
-    mtf_file        : str       - MTF file (3 columns: freq, MTF, epsilon)
-    clip            : bool      - if True, negative values are set to 0
-    n_iterations    : int       - maximum number of iterations (safety cap, default 50)
-    tol             : float|None- relative change threshold ||Δu||/||u||
-                                  for early stopping (default 1e-2). None = disabled.
-    pre_smooth_sigma: float     - Gaussian pre-smoothing sigma in pixels
-                                  before deconvolution (0 = disabled)
-    verbose         : bool      - if True, print rel_change at each iteration
-    plot            : bool      - display PSF profile
+    image : ndarray
+        2D image to deconvolve.
+    mtf_file : str
+        Path to the MTF file (columns: frequency in cyc/px, MTF value).
+    clip : bool, optional
+        If ``True``, clamp negative values to 0 after each iteration.
+        Default is ``True``.
+    n_iterations : int, optional
+        Maximum number of iterations (safety cap). Default is 50.
+    tol : float or None, optional
+        Early-stopping threshold on the relative change ``||\u0394u||/||u||``.
+        ``None`` disables early stopping. Default is ``1e-2``.
+    pre_smooth_sigma : float, optional
+        Standard deviation (pixels) for Gaussian pre-smoothing applied
+        before deconvolution. ``0`` disables smoothing. Default is ``0``.
+    verbose : bool, optional
+        If ``True``, print the relative change at each iteration.
+        Default is ``False``.
+    plot : bool, optional
+        If ``True``, display the PSF profile. Default is ``False``.
 
     Returns
     -------
-    image_deconv : 2D array - deconvolved image
+    image_deconv : ndarray
+        Deconvolved 2D image.
     """
     # ------------------------------------------------------------------
     # 1. Load MTF

@@ -21,22 +21,35 @@ class SAEDProcessor:
                 wiener_epsilon=None,
                 verbose=False):
         """
-        Initialize a SAED data processor.
-        
+        Initialise a SAED data processor.
+
+        Loads the image, identifies the camera type and wavelength from
+        metadata, optionally applies MTF deconvolution, and prepares the
+        pyFAI azimuthal integrator if a PONI file is provided.
+
         Parameters
         ----------
         image_file : str
-            SAED data file in DM4, DM3, tif, tiff format
+            Path to the SAED data file (DM4, DM3, tif, tiff).
         poni_file : str, optional
-            Geometric calibration file in .poni format
+            Path to the pyFAI geometric calibration file (.poni).
+            If ``None``, a pixel-scale integrator is used.
         mask : str, optional
-            Mask file for the image
+            Path to a fabio mask file (EDF or similar). Convention:
+            0 = valid pixel, 1 = masked pixel.
         mtf_file : str, optional
-            MTF file for deconvolution by camera MTF
-        wiener_epsilon : float
-            Wiener filter epsilon for MTF deconvolution
-        verbose : bool
-            If True, prints metadata information
+            Path to the MTF file used for detector deconvolution.
+            If ``None``, no deconvolution is applied.
+        filter : {'rl', 'wiener'}, optional
+            Deconvolution algorithm. ``'rl'`` (default) uses
+            Richardson-Lucy; ``'wiener'`` uses the Wiener filter.
+        n_iterations : int, optional
+            Number of Richardson-Lucy iterations. Default is 50.
+        wiener_epsilon : float, optional
+            Regularisation parameter for the Wiener filter.
+            If ``None``, read from the MTF file.
+        verbose : bool, optional
+            If ``True``, print metadata and detector info. Default is ``False``.
         """
         self.dm4_file = image_file
         self.poni_file = poni_file
@@ -81,25 +94,31 @@ class SAEDProcessor:
 
     def integrate(self, dm4_file=None, npt=2500, initial_center=None, plot=False):
         """
-        Integrate SAED pattern to 1D.
-        
+        Azimuthally integrate the SAED pattern to a 1D I(q) profile.
+
+        If a PONI file was provided at initialisation, pyFAI is used after
+        iterative beam-centre recalibration. Otherwise, a simple radial
+        binning is applied using the pixel scale from the image metadata.
+
         Parameters
         ----------
         dm4_file : str, optional
-            File to integrate. If None, uses self.dm4_file
-        npt : int
-            Number of points in output
-        initial_center : tuple, optional
-            Initial center (x, y) in pixels. If None, uses self.initial_center
-        plot : bool
-            If True, displays the integrated pattern
-        
+            Path to an alternative DM4 file to integrate. If ``None``,
+            uses ``self.dm4_file``.
+        npt : int, optional
+            Number of points in the output q profile. Default is 2500.
+        initial_center : tuple of float, optional
+            Initial beam centre ``(x, y)`` in pixels. Falls back to
+            ``self.initial_center`` if ``None``.
+        plot : bool, optional
+            If ``True``, display the integrated I(q) pattern. Default is ``False``.
+
         Returns
         -------
-        q : array
-            Scattering vector
-        I : array
-            Integrated intensity
+        q : ndarray
+            Scattering vector in Å⁻¹.
+        I : ndarray
+            Azimuthally averaged intensity.
         """
         
         
@@ -177,12 +196,16 @@ class SAEDProcessor:
     
     def plot_recalibrated_image(self, initial_center=None):
         """
-        Plot the diffraction image with detected center and rings.
-        
+        Display the diffraction image with the detected beam centre and rings.
+
+        Runs the recalibration with ``plot=True`` to trigger the diagnostic
+        figure, without storing the result.
+
         Parameters
         ----------
-        initial_center : tuple, optional
-            Initial center (x, y) in pixels. If None, uses self.initial_center
+        initial_center : tuple of float, optional
+            Initial beam centre ``(x, y)`` in pixels. Falls back to
+            ``self.initial_center`` if ``None``.
         """
         center = initial_center if initial_center is not None else self.initial_center
         
@@ -212,38 +235,49 @@ class SAEDProcessor:
                      initial_center=None,
                      initial_center_ref=None):
         """
-        Extract ePDF from SAED data (legacy method, prefer using extract_epdf function).
-        
-        This method creates a temporary SAEDProcessor for the reference and calls
-        the standalone extract_epdf function.
-        
+        Extract the ePDF from the SAED data (convenience wrapper).
+
+        Creates a temporary :class:`SAEDProcessor` for the reference if
+        provided, then delegates to the standalone :func:`extract_epdf`
+        function.
+
         Parameters
         ----------
         ref_diffraction_image : str, optional
-            Path to reference diffraction image
+            Path to the reference (background) diffraction image.
         ref_poni_file : str, optional
-            Path to reference poni file (if different from sample)
-        composition : str
-            Chemical composition
-        rmin, rmax, rstep : float
-            PDF r-range parameters
+            Path to a PONI file for the reference image if it differs from
+            the sample.
+        composition : str, optional
+            Chemical formula of the sample (e.g. ``'Au'``, ``'SiO2'``).
+            Default is ``'Au'``.
+        rmin, rmax, rstep : float, optional
+            Real-space range and step for G(r) in Å.
         outputfile : str, optional
-            Output filename
-        interactive : bool
-            If True, shows interactive GUI
-        plot : bool
-            If True, plots results (non-interactive mode)
-        bgscale, qmin, qmax, qmaxinst, rpoly : float
-            PDF computation parameters
-        initial_center : tuple, optional
-            Override self.initial_center for this call
-        initial_center_ref : tuple, optional
-            Initial center for reference image
-        
+            Path for the output ``.gr`` file. Auto-generated if ``None``.
+        interactive : bool, optional
+            If ``True`` (default), open the interactive slider GUI.
+        plot : bool, optional
+            If ``True``, display plots in non-interactive mode.
+        mtf_file : str, optional
+            Not used in this wrapper (MTF applied at initialisation).
+        bgscale : float, optional
+            Background scaling factor. Default is 1.
+        qmin, qmax, qmaxinst : float, optional
+            Q-range limits in Å⁻¹ for PDF computation.
+        rpoly : float, optional
+            Polynomial background degree control (PDFgetX3 convention).
+        initial_center : tuple of float, optional
+            Override ``self.initial_center`` for this call.
+        initial_center_ref : tuple of float, optional
+            Initial beam centre for the reference image.
+
         Returns
         -------
         results : PDFResultsReference or tuple
-            PDF results
+            Interactive mode: :class:`PDFResultsReference` supporting
+            ``r, g = results`` unpacking.
+            Non-interactive mode: ``(r, G)`` tuple of ndarrays.
         """
         # Create reference processor if provided
         ref_processor = None
@@ -447,49 +481,57 @@ def extract_epdf(sample_processor,
                  qmaxinst=24,
                  rpoly=1.4):
     """
-    Extract electron pair distribution function (ePDF) from SAED data.
-    
-    This standalone function provides a clean interface for ePDF extraction,
-    treating sample and reference data symmetrically via SAEDProcessor instances.
-    
+    Extract the electron Pair Distribution Function (ePDF) from SAED data.
+
+    Integrates each :class:`SAEDProcessor` to a 1D I(q) profile, then calls
+    :func:`~epdfsuite.pdf_extraction.compute_ePDF`. In interactive mode an
+    ipywidgets GUI is shown; in non-interactive mode G(r) is computed once
+    and saved to a ``.gr`` file.
+
     Parameters
     ----------
     sample_processor : SAEDProcessor
-        Processor for sample diffraction data. Should have initial_center set if needed.
+        Processor loaded with the sample diffraction image.
+        Set ``sample_processor.initial_center`` before calling if needed.
     ref_processor : SAEDProcessor, optional
-        Processor for reference/background diffraction data. If None, no background subtraction.
-    composition : str
-        Chemical composition (e.g., 'Au', 'Fe2O3')
-    rmin, rmax, rstep : float
-        PDF r-range parameters (Angstroms)
+        Processor loaded with the background/reference image.
+        If ``None``, no background subtraction is performed.
+    composition : str, optional
+        Chemical formula of the sample (e.g. ``'Au'``, ``'Fe2O3'``).
+        Default is ``'Au'``.
+    rmin, rmax, rstep : float, optional
+        Real-space range and step for G(r) in Å.
+        Defaults: 0.1, 50.0, 0.01.
     outputfile : str, optional
-        Path to save PDF results. Auto-generated if None.
-    interactive : bool
-        If True, shows interactive parameter adjustment GUI
-    plot : bool
-        If True, plots results in non-interactive mode
-    bgscale, qmin, qmax, qmaxinst, rpoly : float
-        PDF computation parameters
-    
+        Path for the output ``.gr`` file.
+        Auto-generated from the sample filename if ``None``.
+    interactive : bool, optional
+        If ``True`` (default), open the interactive slider GUI via
+        :class:`PDFInteractive`.
+    plot : bool, optional
+        If ``True``, display G(r) and F(Q) in non-interactive mode.
+    bgscale : float, optional
+        Background scaling factor applied to the reference. Default is 1.
+    qmin, qmax, qmaxinst : float, optional
+        Q-range limits in Å⁻¹ used for the Fourier transform and polynomial
+        background fitting.
+    rpoly : float, optional
+        Polynomial degree control (PDFgetX3 convention). Default is 1.4.
+
     Returns
     -------
     results : PDFResultsReference or tuple
-        Interactive mode: PDFResultsReference with .r and .g properties
-        Non-interactive mode: tuple (r, G)
-    
+        Interactive mode: :class:`PDFResultsReference` — supports
+        ``r, g = results`` unpacking after slider adjustment.
+        Non-interactive mode: ``(r, G)`` tuple of ndarrays.
+
     Examples
     --------
-    >>> # Setup processors
     >>> sample = SAEDProcessor('sample.dm4', poni_file='calib.poni')
-    >>> sample.plot()  # Inspect to determine center
-    >>> sample.initial_center = (335, 275)  # Set after inspection
-    >>> 
-    >>> ref = SAEDProcessor('reference.dm4', poni_file='calib.poni')
-    >>> ref.initial_center = (324, 257)
-    >>> 
-    >>> # Extract PDF
-    >>> results = extract_epdf(sample, ref, composition='Au', interactive=True)
-    >>> r, g = results  # Access results
+    >>> sample.initial_center = (335, 275)
+    >>> ref = SAEDProcessor('ref.dm4', poni_file='calib.poni')
+    >>> results = extract_epdf(sample, ref, composition='Au', interactive=False)
+    >>> r, G = results
     """
     # Integrate sample
     q_sample, intensity_sample = sample_processor.integrate(plot=False)
@@ -583,31 +625,29 @@ def extract_epdf(sample_processor,
 # ------------------
 class PDFResultsReference:
     """
-    A reference object that allows unpacking of PDF results from interactive mode.
-    
-    This class acts as a wrapper around PDFInteractive, providing access to the
-    most recently computed r and G values through tuple unpacking.
-    
-    Usage:
-        r, g = proc.extract_epdf(interactive=True)
-        # After adjusting sliders, r and g will contain the latest values
-        print(r, g)  # Access the arrays directly
+    Proxy object providing access to the most recent PDF results from interactive mode.
+
+    Wraps a :class:`PDFInteractive` instance and supports tuple unpacking
+    (``r, g = reference``) so that the same syntax works whether the
+    extraction is interactive or not. Values reflect the **last slider
+    state** — call ``r, g = results`` after adjusting the sliders.
     """
     
     def __init__(self, pdf_interactive):
         """
-        Initialize with a PDFInteractive instance.
-        
-        Args:
-            pdf_interactive: The PDFInteractive object containing the results
+        Parameters
+        ----------
+        pdf_interactive : PDFInteractive
+            The interactive GUI object holding the computed results.
         """
         self._pdf_interactive = pdf_interactive
     
     def __iter__(self):
         """
-        Allow tuple unpacking: r, g = reference
-        
-        Returns the latest computed r and G arrays.
+        Support tuple unpacking: ``r, g = reference``.
+
+        Returns the latest r and G arrays computed by the interactive GUI.
+        Prints a warning if no computation has been performed yet.
         """
         if self._pdf_interactive.last_r is None or self._pdf_interactive.last_G is None:
             print("⚠️ Aucune valeur disponible. Ajustez les paramètres avec les sliders pour générer r et G.")
@@ -615,7 +655,7 @@ class PDFResultsReference:
         return iter([self._pdf_interactive.last_r, self._pdf_interactive.last_G])
     
     def __repr__(self):
-        """String representation of the reference."""
+        """String representation showing r-range and number of points."""
         if self._pdf_interactive.last_r is None:
             return "PDFResultsReference(no data yet - adjust sliders to compute)"
         return f"PDFResultsReference(r: {len(self._pdf_interactive.last_r)} points, " \
@@ -623,12 +663,12 @@ class PDFResultsReference:
     
     @property
     def r(self):
-        """Direct access to r array."""
+        """ndarray : Real-space distance axis in Å from the last computation."""
         return self._pdf_interactive.last_r
     
     @property
     def g(self):
-        """Direct access to G array."""
+        """ndarray : G(r) values in Å⁻² from the last computation."""
         return self._pdf_interactive.last_G
 
 
@@ -637,9 +677,13 @@ class PDFResultsReference:
 # ------------------
 class PDFInteractive:
     """
-    Interactive widget-based interface for PDF parameter optimization.
-    
-    
+    Jupyter widget GUI for interactive ePDF parameter optimisation.
+
+    Displays ipywidgets sliders for ``bgscale``, ``qmin``, ``qmax``,
+    ``qmaxinst``, and ``rpoly``, recomputing G(r) in real time.
+    Results can be exported to a ``.gr`` file via the Save button.
+
+    Intended to be created by :func:`extract_epdf` — not directly by users.
     """
 
     def __init__(self,
@@ -652,14 +696,21 @@ class PDFInteractive:
                  xray: bool = False,
                  outputfile: str = './pdf_results.csv'):
         """
-        Initialise l'interface interactive PDF à partir de deux SAEDProcessor.
-        Args:
-            sample_processor (SAEDProcessor): instance pour le signal
-            ref_processor (SAEDProcessor, optionnel): instance pour le fond
-            composition (str): formule chimique
-            rmin, rmax, rstep (float): paramètres PDF
-            xray (bool): X-ray scattering factors
-            outputfile (str): nom du fichier de sortie
+        Parameters
+        ----------
+        sample_processor : SAEDProcessor
+            Processor for the sample diffraction data.
+        ref_processor : SAEDProcessor, optional
+            Processor for the background/reference image. Default is ``None``.
+        composition : str, optional
+            Chemical formula of the sample. Default is ``'Au'``.
+        rmin, rmax, rstep : float, optional
+            Real-space range and step for G(r) in Å.
+        xray : bool, optional
+            If ``True``, use X-ray scattering factors. Default is ``False``.
+        outputfile : str, optional
+            Default path for the Save button output. Default is
+            ``'./pdf_results.csv'``.
         """
         import ipywidgets as widgets
         from IPython.display import display
@@ -752,9 +803,22 @@ class PDFInteractive:
 
     def update_plot(self, bgscale, qmin, qmax, qmaxinst, rpoly, lorch):
         """
-        Update the PDF calculation and plots when parameters change.
-        
-        This function is called automatically when any slider value changes.
+        Recompute G(r) and refresh the output plot.
+
+        Called automatically by ``ipywidgets.interactive_output`` whenever
+        a slider value changes. Stores the result in ``self.last_r`` and
+        ``self.last_G``.
+
+        Parameters
+        ----------
+        bgscale : float
+            Background scaling factor.
+        qmin, qmax, qmaxinst : float
+            Q-range limits in Å⁻¹.
+        rpoly : float
+            Polynomial degree control parameter.
+        lorch : bool
+            Whether to apply the Lorch modification function.
         """
         with self.plot_output:
             self.plot_output.clear_output(wait=True)
@@ -768,11 +832,17 @@ class PDFInteractive:
 
     def save_results(self, b, outputfile='./pdf_results.gr'):
         """
-        Save the last computed PDF results to TXT file with metadata.
-        
-        Args:
-            b: Button widget (unused, required by widget callback signature)
-            outputfile: Output filename (default: './pdf_results.gr')
+        Save the last computed G(r) to a ``.gr`` text file.
+
+        The file format is compatible with PDFgetX3 / PDFBatchAnalysis,
+        with a structured header containing all computation parameters.
+
+        Parameters
+        ----------
+        b : widget button event
+            Unused; required by the ipywidgets callback signature.
+        outputfile : str, optional
+            Output file path. Default is ``'./pdf_results.gr'``.
         """
         if self.last_r is None or self.last_G is None:
             print("⚠️ Aucun résultat à sauvegarder (génère d'abord un plot).")
@@ -809,9 +879,11 @@ class PDFInteractive:
 
     def show(self):
         """
-        Display the interactive interface.
-        
-        Creates a horizontal layout with sliders on the left and plots on the right.
+        Render and display the interactive GUI in a Jupyter notebook.
+
+        Computes G(r) with the current slider values before displaying
+        the interface, so that ``last_r`` and ``last_G`` are immediately
+        available for tuple unpacking.
         """
         # Generate initial plot with default parameter values BEFORE displaying UI
         # This ensures last_r and last_G are immediately available for unpacking
@@ -844,21 +916,42 @@ def extract_ePDF_from_mutliple_files(dm4_files,
                                      plot=False,
                                      verbose=False):
         """
-        Docstring pour extract_ePDF_from_mutliple_files
-        
-        
-        :param dm4_files: list of file paths to SAED data files in DM4, DM3, tif, tiff format
-        :param ref_diffraction_image: file path to reference diffraction image
-        :param ref_poni_file: file path to PONI file for reference (if different resolution from sample)
-        :param composition: chemical composition of the sample
-        :param rmin: minimum r value for PDF calculation
-        :param rmax: maximum r value for PDF calculation
-        :param rstep: step size for r values in PDF calculation
-        :param outputfile: file path to save the output PDF data
-        :param interactive: whether to run in interactive mode
-        :param poni_file: file path to PONI file for calibration
-        :param beamstop: whether to apply beamstop correction
-        :param verbose: whether to print detailed information during processing
+        Extract ePDF by averaging over multiple SAED image files.
+
+        Integrates each file independently, interpolates all profiles onto
+        the q-grid of the first file, computes an average I(q), and calls
+        :func:`~epdfsuite.pdf_extraction.compute_ePDF`.
+
+        Parameters
+        ----------
+        dm4_files : list of str
+            Paths to the SAED image files (DM4, DM3, tif, tiff).
+        ref_diffraction_image : str, optional
+            Path to the background/reference diffraction image.
+        ref_poni_file : str, optional
+            Path to a PONI file for the reference if different from the sample.
+        composition : str, optional
+            Chemical formula of the sample. Default is ``'Au'``.
+        rmin, rmax, rstep : float, optional
+            Real-space range and step for G(r) in Å.
+        qmin, qmax, qmaxinst : float, optional
+            Q-range limits in Å⁻¹ for PDF computation.
+        bgscale : float, optional
+            Background scaling factor. Default is 1.0.
+        rpoly : float, optional
+            Polynomial degree control (PDFgetX3 convention). Default is 1.4.
+        outputfile : str, optional
+            Output ``.gr`` file path. Auto-generated if ``None``.
+        interactive : bool, optional
+            If ``True`` (default), open the interactive slider GUI.
+        poni_file : str, optional
+            Path to the pyFAI PONI calibration file.
+        beamstop : bool, optional
+            Reserved for future use. Default is ``False``.
+        plot : bool, optional
+            If ``True``, display plots in non-interactive mode.
+        verbose : bool, optional
+            If ``True``, print processing details. Default is ``False``.
         """
 
 

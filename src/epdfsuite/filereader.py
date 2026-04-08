@@ -8,14 +8,25 @@ import numpy as np
 
 def extract_camera_type(metadata, detector_lib=DETECTOR_LIBRARY):
     """
-    Extracts camera type from metadata using flexible regex search.
-    
-    Args:
-        metadata: HyperSpy metadata object
-        detector_lib: Dictionary of detectors
-    
-    Returns:
-        Tuple (camera_key_in_lib, title_from_metadata) or (None, None)
+    Identify the camera type from HyperSpy metadata using regex alias matching.
+
+    First attempts an exact match of the image title against library keys, then
+    falls back to case-insensitive regex search over each detector's alias list.
+
+    Parameters
+    ----------
+    metadata : HyperSpy metadata object
+        Metadata loaded from a DM4 (or other HyperSpy-supported) file.
+    detector_lib : dict, optional
+        Detector library to search. Defaults to the built-in
+        :data:`DETECTOR_LIBRARY`.
+
+    Returns
+    -------
+    camera_key : str or None
+        Key of the matched detector in ``detector_lib``, or ``None`` if not found.
+    camera_title : str or None
+        Raw title string found in the metadata, or ``None`` if unavailable.
     """
     try:
         if hasattr(metadata, 'General'):
@@ -54,16 +65,28 @@ def extract_camera_type(metadata, detector_lib=DETECTOR_LIBRARY):
 
 def _search_metadata_recursive(obj, target_keys, depth=0, max_depth=10):
     """
-    Recursively search through metadata object for target keys.
-    
-    Args:
-        obj: Metadata object to search
-        target_keys: List of key names to search for (case-insensitive)
-        depth: Current recursion depth
-        max_depth: Maximum recursion depth to avoid infinite loops
-    
-    Returns:
-        Dict with found values: {key: value}
+    Recursively search a HyperSpy metadata object for target field names.
+
+    Traverses attributes and dictionary-like entries at each level, performing
+    case-insensitive substring matching of attribute names against ``target_keys``.
+
+    Parameters
+    ----------
+    obj : object
+        Root metadata object (HyperSpy ``DictionaryTreeBrowser`` or any object
+        with ``__dict__`` or dict-like interface).
+    target_keys : list of str
+        Field names to search for (case-insensitive substring match).
+    depth : int, optional
+        Current recursion depth. Default is 0.
+    max_depth : int, optional
+        Maximum recursion depth to prevent infinite loops. Default is 10.
+
+    Returns
+    -------
+    found : dict
+        Mapping ``{attribute_name: value}`` for all matched scalar fields
+        (int, float, or str).
     """
     found = {}
     
@@ -112,19 +135,30 @@ def _search_metadata_recursive(obj, target_keys, depth=0, max_depth=10):
 
 def extract_wavelength(metadata=None, voltage_kv=None):
     """
-    Extracts electron wavelength from accelerating voltage or directly from metadata.
-    
-    Performs deep recursive search through metadata for wavelength, energy, or voltage information.
-    
-    Uses the de Broglie wavelength formula for electrons:
-    λ = h / √(2 * m_e * e * V * (1 + e*V/(2*m_e*c²)))
-    
-    Args:
-        metadata: HyperSpy metadata object (optional)
-        voltage_kv: Accelerating voltage in kV (optional)
-    
-    Returns:
-        Float wavelength in Ångströms, or None if not found
+    Determine the relativistic electron wavelength from metadata or voltage.
+
+    Searches the metadata recursively for a wavelength, beam energy, or
+    accelerating voltage field. If a direct wavelength is found (0.001–1 Å)
+    it is returned immediately. Otherwise the wavelength is computed from the
+    voltage using the relativistic de Broglie relation:
+
+    .. math::
+
+        \\lambda = \\frac{h}{\\sqrt{2 m_e e V \\left(1 + \\frac{eV}{2 m_e c^2}\\right)}}
+
+    Parameters
+    ----------
+    metadata : HyperSpy metadata object, optional
+        Metadata from a DM4 file. If ``None``, ``voltage_kv`` must be provided.
+    voltage_kv : float, optional
+        Accelerating voltage in kV. Overrides the voltage found in ``metadata``
+        if both are provided.
+
+    Returns
+    -------
+    wavelength : float or None
+        Electron wavelength in Å, or ``None`` if neither voltage nor wavelength
+        could be determined.
     """
     
     wavelength_angstrom = None
@@ -208,7 +242,23 @@ def extract_wavelength(metadata=None, voltage_kv=None):
     return wavelength_angstrom
 
 def get_detector_params(camera_key, detector_lib=DETECTOR_LIBRARY):
-    """Returns detector parameters without aliases."""
+    """
+    Return the parameters of a detector from the library, without alias entries.
+
+    Parameters
+    ----------
+    camera_key : str
+        Key name of the detector in ``detector_lib``.
+    detector_lib : dict, optional
+        Detector library to query. Defaults to :data:`DETECTOR_LIBRARY`.
+
+    Returns
+    -------
+    params : dict or None
+        Copy of the detector parameter dictionary (``pixel_size``,
+        ``image_width``, ``image_height``, ``binning``, ``description``),
+        or ``None`` if ``camera_key`` is not found.
+    """
     if camera_key in detector_lib:
         params = detector_lib[camera_key].copy()
         params.pop('aliases', None)  # Remove aliases from result
@@ -218,17 +268,34 @@ def get_detector_params(camera_key, detector_lib=DETECTOR_LIBRARY):
         print(f"Available cameras: {list(detector_lib.keys())}")
         return None
     
-def load_data(file,normalize=True,verbose=True):    
+def load_data(file, normalize=True, verbose=True):
     """
-    Loads a dm4 file and returns detector parameters and raw_image
-    
-    Args:
-        file: path to file
-        normalize: whether to normalize image by exposure time (bool)
-        
-    Returns:
-        detector_info: Dict with pixel size, resolution, camera type, and wavelength
-        raw_image: 2D array of raw image
+    Load a DM4 image file and return detector metadata and the image array.
+
+    Identifies the camera type and wavelength from the file metadata,
+    optionally normalises the raw counts by the exposure time, and prints
+    a summary of the detected instrument parameters.
+
+    Parameters
+    ----------
+    file : str
+        Path to the DM4 image file.
+    normalize : bool, optional
+        If ``True`` (default), divide the image by the exposure time (s)
+        to obtain a count-rate image. Has no effect if the exposure time
+        cannot be found in the metadata.
+    verbose : bool, optional
+        If ``True`` (default), print loaded file info and detector parameters.
+
+    Returns
+    -------
+    detector_info : dict
+        Dictionary with keys: ``camera_type``, ``camera_title``,
+        ``pixel_size`` (µm), ``image_width`` (px), ``image_height`` (px),
+        ``binning``, ``description``, ``wavelength`` (Å),
+        ``exposure_time`` (s, if found).
+    raw_image : ndarray
+        2D float array of the image, normalised by exposure time if requested.
     """
     
     
@@ -296,19 +363,34 @@ def load_data(file,normalize=True,verbose=True):
 
 def add_detector(camera_key, pixel_size, image_width, image_height, binning=1, description='', aliases=None):
     """
-    Add a new detector to the detector library and save to camera_library.py.
-    
-    Args:
-        camera_key: Key name for the detector (str)
-        pixel_size: Pixel size in micrometers (float)
-        image_width: Image width in pixels (int)
-        image_height: Image height in pixels (int)
-        binning: Binning factor (int, default 1)
-        description: Description of the detector (str, optional)
-        aliases: List of regex patterns to match this detector (list, optional)
-        
-    Returns:
-        bool: True if added successfully, False if key already exists
+    Add a new detector entry to the in-memory library and persist it to disk.
+
+    The entry is appended to the global :data:`DETECTOR_LIBRARY` dictionary
+    and immediately written back to ``camera_library.py``.
+
+    Parameters
+    ----------
+    camera_key : str
+        Unique identifier for the detector (e.g. ``'K3_300kV'``).
+    pixel_size : float
+        Physical pixel size in micrometres (µm).
+    image_width : int
+        Full-frame image width in pixels.
+    image_height : int
+        Full-frame image height in pixels.
+    binning : int, optional
+        Hardware binning factor applied at acquisition. Default is 1.
+    description : str, optional
+        Human-readable description of the detector.
+    aliases : list of str, optional
+        List of regex patterns (case-insensitive) used to match this detector
+        from image title strings in metadata. Default is ``[]``.
+
+    Returns
+    -------
+    success : bool
+        ``True`` if the detector was added, ``False`` if ``camera_key``
+        already exists in the library.
     """
     if camera_key in DETECTOR_LIBRARY:
         print(f"⚠ Camera type '{camera_key}' already exists in library")
@@ -335,7 +417,12 @@ def add_detector(camera_key, pixel_size, image_width, image_height, binning=1, d
     return 
 
 def _save_detector_library():
-    """Save DETECTOR_LIBRARY to camera_library.py file."""
+    """
+    Persist the current state of :data:`DETECTOR_LIBRARY` to ``camera_library.py``.
+
+    Overwrites the file with a pretty-printed Python assignment so that changes
+    made via :func:`add_detector` survive across sessions.
+    """
     import pprint
     
     # Get the path to camera_library.py
