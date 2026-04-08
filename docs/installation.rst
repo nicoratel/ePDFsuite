@@ -1,6 +1,18 @@
 Installation
 ============
 
+No-install option
+-----------------
+
+The fastest way to get started is the **hosted Streamlit app** — no Python,
+no installation required:
+
+   👉 `https://epdfsuite.streamlit.app/ <https://epdfsuite.streamlit.app/>`_
+
+Open the link in your browser, upload your files and extract ePDFs directly.
+See :doc:`streamlit_app` for a description of the interface.
+
+
 Requirements
 ------------
 
@@ -34,5 +46,5 @@ Camera calibration
 
 MTF correction requires a pre-measured MTF file (``.mtf``).
 See the `calibration guide on GitHub
-<https://github.com/nicoratel/ePDFsuite/blob/main/Camera_Calibration_readME.md>`_
+<https://github.com/nicoratel/ePDFsuite/blob/main/INSTALLATION_GUIDE_Calibration.md>`_
 for instructions on measuring the MTF with the slanted-edge method.

@@ -14,6 +14,7 @@ azimuthal integration, and PDF computation following the PDFgetX3 formalism.
 
    installation
    quickstart
+   streamlit_app
 
 .. toctree::
    :maxdepth: 2
