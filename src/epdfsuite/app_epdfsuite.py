@@ -97,7 +97,7 @@ with tab1:
             label_visibility="collapsed"
         )
         
-        st.markdown("**PONI File**")
+        st.markdown("**PONI File (optional)**")
         sample_poni = st.file_uploader(
             "Upload sample PONI file (optional)",
             type=["poni"],
@@ -105,7 +105,7 @@ with tab1:
             label_visibility="collapsed"
         )
         
-        st.markdown("**Mask File**")
+        st.markdown("**Mask File (optional)**")
         sample_mask = st.file_uploader(
             "Upload sample mask file (*.edf, optional)",
             type=["edf"],
@@ -113,7 +113,7 @@ with tab1:
             label_visibility="collapsed"
         )
         
-        st.markdown("**MTF File**")
+        st.markdown("**MTF File (optional)**")
         sample_mtf = st.file_uploader(
             "Upload sample MTF file (optional)",
             key="sample_mtf",
