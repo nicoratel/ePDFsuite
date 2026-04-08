@@ -43,7 +43,7 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://github.com/nicoratel/ePDFsuite"
-Documentation = "https://github.com/nicoratel/ePDFsuite/wiki"
+Documentation = "https://epdfsuite.readthedocs.io"
 Repository = "https://github.com/nicoratel/ePDFsuite"
 Issues = "https://github.com/nicoratel/ePDFsuite/issues"
 
