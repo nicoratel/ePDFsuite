@@ -61,7 +61,9 @@ Optional dependencies
 ---------------------
 
 `pdfanalysis <https://github.com/nicoratel/pdfanalysis>`_ is an independent
-companion library for PDF analysis. It is **not required** by ePDFsuite but
+companion library for PDF analysis, allowing the refinement of atomic structural
+models against experimental PDF obtained by ePDFsuite or pdfgetX3.
+It is **not required** by ePDFsuite but
 provides an additional Streamlit-based application accessible via the
 command line:
 
