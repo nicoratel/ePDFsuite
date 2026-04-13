@@ -16,6 +16,7 @@ from plotly.subplots import make_subplots
 from epdfsuite import SAEDProcessor, extract_epdf
 from epdfsuite.recalibration import recalibrate_with_beamstop_noponi
 from epdfsuite.filereader import load_data
+from epdfsuite.utilities import draw_mask
 from epdfsuite.pdf_extraction import compute_ePDF
 import hyperspy.api as hs
 
@@ -97,7 +98,7 @@ with tab1:
             label_visibility="collapsed"
         )
         
-        st.markdown("**PONI File (optional)**")
+        st.markdown("**PONI File**")
         sample_poni = st.file_uploader(
             "Upload sample PONI file (optional)",
             type=["poni"],
@@ -105,7 +106,21 @@ with tab1:
             label_visibility="collapsed"
         )
         
-        st.markdown("**Mask File (optional)**")
+        _col_mask, _col_btn = st.columns([3, 2])
+        with _col_mask:
+            st.markdown("**Mask File**")
+        with _col_btn:
+            if st.button("🎨 Click here to draw mask",
+                         disabled=(sample_image is None),
+                         help="Opens the pyFAI-drawmask GUI on the sample image"):
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".dm4") as _tmp:
+                    _tmp.write(sample_image.getbuffer())
+                    _tmp_path = _tmp.name
+                try:
+                    draw_mask(_tmp_path)
+                finally:
+                    if os.path.exists(_tmp_path):
+                        os.remove(_tmp_path)
         sample_mask = st.file_uploader(
             "Upload sample mask file (*.edf, optional)",
             type=["edf"],
@@ -113,7 +128,7 @@ with tab1:
             label_visibility="collapsed"
         )
         
-        st.markdown("**MTF File (optional)**")
+        st.markdown("**MTF File**")
         sample_mtf = st.file_uploader(
             "Upload sample MTF file (optional)",
             key="sample_mtf",

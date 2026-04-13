@@ -216,6 +216,122 @@ class SAEDProcessor:
         else:
             _ = recalibrate_with_beamstop_noponi(self.img, initial_center=center, plot=True)
 
+    def inspect_histogram(self, bins=256, log_scale=True, exclude_zero=False,
+                          saturation_threshold=0.98, percentile_clip=99.9999):
+        """
+        Plot the grey-level histogram of the image to assess camera linearity.
+
+        Always displays two side-by-side subplots:
+
+        * **Left** — full image (no mask), full x-axis range, so that
+          saturated pixels from e.g. the direct beam are visible.
+        * **Right** — valid pixels only (mask applied, if a mask was
+          provided), with the x-axis clipped to ``percentile_clip`` to
+          reveal the bulk distribution.
+
+        A smooth, monotonically decreasing histogram with no spike at the
+        maximum indicates a linear camera response.
+
+        Parameters
+        ----------
+        bins : int, optional
+            Number of histogram bins. Default is 256.
+        log_scale : bool, optional
+            If ``True`` (default), both y-axes are in log scale.
+        exclude_zero : bool, optional
+            If ``True``, zero-valued pixels are excluded from both
+            histograms. Default is ``False``.
+        saturation_threshold : float, optional
+            Fraction of the global maximum above which pixels are flagged
+            as potentially saturated. A vertical red dashed line is drawn
+            at this value on both subplots. Default is 0.98.
+        percentile_clip : float, optional
+            Percentile used to clip the x-axis of the **masked** (right)
+            subplot only. Useful when a few very bright pixels compress the
+            distribution towards zero. Default is 99.9999. Set to 100 to
+            disable clipping.
+
+        Returns
+        -------
+        counts_raw : ndarray
+            Pixel counts per bin for the unmasked histogram.
+        edges_raw : ndarray
+            Bin edges for the unmasked histogram.
+        counts_masked : ndarray or None
+            Pixel counts per bin for the masked histogram, or ``None`` if
+            no mask is defined.
+        edges_masked : ndarray or None
+            Bin edges for the masked histogram, or ``None`` if no mask.
+        """
+        # Saturation threshold based on the full-image maximum
+        all_data = self.img.ravel().astype(float)
+        sat_value = saturation_threshold * all_data.max()
+
+        # --- unmasked data (left subplot) ---
+        data_raw = all_data.copy()
+        if exclude_zero:
+            data_raw = data_raw[data_raw > 0]
+
+        # --- masked data (right subplot) ---
+        has_mask = self.mask is not None and np.any(self.mask != 0)
+        if has_mask:
+            data_masked = self.img[self.mask == 0].ravel().astype(float)
+            if exclude_zero:
+                data_masked = data_masked[data_masked > 0]
+        else:
+            data_masked = data_raw  # fallback: same data
+
+        counts_raw, edges_raw = np.histogram(data_raw, bins=bins)
+        centers_raw = 0.5 * (edges_raw[:-1] + edges_raw[1:])
+
+        counts_masked, edges_masked = np.histogram(data_masked, bins=bins)
+        centers_masked = 0.5 * (edges_masked[:-1] + edges_masked[1:])
+
+        fig, axes = plt.subplots(2, 1, figsize=(10, 8))
+
+        def _draw(ax, centers, counts, edges, title, clip_xaxis):
+            ax.bar(centers, counts, width=np.diff(edges), align='center',
+                   color='steelblue', edgecolor='none', alpha=0.8)
+            ax.axvline(sat_value, color='red', linestyle='--', linewidth=1.2,
+                       label=f'Sat. threshold ({saturation_threshold*100:.0f}% = {sat_value:.0f} cts)')
+            if clip_xaxis and percentile_clip < 100:
+                xmax = np.percentile(data_masked, percentile_clip)
+                ax.set_xlim(left=0, right=xmax)
+            if log_scale:
+                ax.set_yscale('log')
+            ax.set_xlabel('Grey level (counts)')
+            ax.set_ylabel('Number of pixels')
+            ax.set_title(title)
+            ax.legend(fontsize=8)
+
+        _draw(axes[0], centers_raw, counts_raw, edges_raw,
+              title='Raw image (no mask) — full range',
+              clip_xaxis=False)
+
+        masked_title = (f'Masked image — x clipped at {percentile_clip}th percentile'
+                        if has_mask else 'No mask provided — same as raw')
+        _draw(axes[1], centers_masked, counts_masked, edges_masked,
+              title=masked_title,
+              clip_xaxis=True)
+
+        plt.suptitle('Image histogram — camera linearity check', fontsize=12, y=1.01)
+        plt.tight_layout()
+        plt.show()
+
+        # --- warnings (on masked data if available, raw otherwise) ---
+        data_check = data_masked if has_mask else data_raw
+        n_sat = int(np.sum(data_check >= sat_value))
+        label = 'masked image' if has_mask else 'image'
+        if n_sat > 0:
+            print(f"Warning: {n_sat} pixel(s) in {label} above the saturation threshold "
+                  f"({saturation_threshold*100:.0f}% of max = {sat_value:.0f} counts). "
+                  "Camera linearity may be compromised.")
+        else:
+            print(f"No saturated pixels detected in {label} — camera response appears linear.")
+
+        return 
+
+
     def extract_epdf(self,
                      ref_diffraction_image=None,
                      ref_poni_file=None,
