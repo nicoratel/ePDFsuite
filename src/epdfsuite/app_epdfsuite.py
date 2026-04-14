@@ -164,11 +164,12 @@ with tab1:
                 
                 # Center input
                 st.markdown("**Beam Center Coordinates**")
+                _max_yx_sample = np.unravel_index(np.argmax(img_sample), img_sample.shape)
                 col_cx, col_cy = st.columns(2)
                 with col_cx:
-                    sample_center_x = st.number_input("Center X", value=img_sample.shape[1]//2, step=1, key="sample_cx")
+                    sample_center_x = st.number_input("Center X", value=int(_max_yx_sample[1]), step=1, key="sample_cx")
                 with col_cy:
-                    sample_center_y = st.number_input("Center Y", value=img_sample.shape[0]//2, step=1, key="sample_cy")
+                    sample_center_y = st.number_input("Center Y", value=int(_max_yx_sample[0]), step=1, key="sample_cy")
                 
                 # Store paths in session state
                 st.session_state.sample_tmp_path = sample_tmp_path
@@ -280,11 +281,12 @@ with tab1:
                 
                 # Center input
                 st.markdown("**Beam Center Coordinates**")
+                _max_yx_ref = np.unravel_index(np.argmax(img_ref), img_ref.shape)
                 col_cx, col_cy = st.columns(2)
                 with col_cx:
-                    ref_center_x = st.number_input("Center X", value=img_ref.shape[1]//2, step=1, key="ref_cx")
+                    ref_center_x = st.number_input("Center X", value=int(_max_yx_ref[1]), step=1, key="ref_cx")
                 with col_cy:
-                    ref_center_y = st.number_input("Center Y", value=img_ref.shape[0]//2, step=1, key="ref_cy")
+                    ref_center_y = st.number_input("Center Y", value=int(_max_yx_ref[0]), step=1, key="ref_cy")
                 
                 # Store paths in session state
                 st.session_state.ref_tmp_path = ref_tmp_path
