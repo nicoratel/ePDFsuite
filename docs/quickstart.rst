@@ -4,19 +4,18 @@ Quick start
 Typical workflow
 ----------------
 
-A complete ePDF extraction follows four steps:
+A complete ePDF extraction follows three steps:
 
-1. Load the image and inspect it visually to estimate the beam centre.
-2. Provide this estimate as ``initial_center`` — the software then
-   **automatically recalibrates** the exact centre by fitting the most
-   intense diffraction ring (iterative moment method).
-3. Verify the recalibration visually.
-4. Integrate and extract G(r).
+1. Create a :class:`~epdfsuite.ePDFsuite.SAEDProcessor` — the beam centre is
+   **detected automatically** at initialisation using the iso-intensity
+   contour method.
+2. Verify (and optionally refine) the centre visually.
+3. Integrate and extract G(r).
 
 All processing goes through :class:`~epdfsuite.ePDFsuite.SAEDProcessor` and the
 standalone :func:`~epdfsuite.ePDFsuite.extract_epdf` function.
 
-**Step 1 — Load and inspect the image**
+**Step 1 — Create the processor (auto-detects beam centre)**
 
 .. code-block:: python
 
@@ -27,43 +26,32 @@ standalone :func:`~epdfsuite.ePDFsuite.extract_epdf` function.
        poni_file='calibration.poni',
        mtf_file='camera.mtf',   # optional: apply MTF deconvolution at load time
    )
-   proc.plot()   # display the image in log scale to visually locate the beam centre
+   # proc.center is now set automatically as (cx, cy) in pixels
 
-Read the approximate beam centre ``(x, y)`` in pixels from the plot —
-this will be used as the starting point for automatic recalibration.
+At initialisation :class:`~epdfsuite.ePDFsuite.SAEDProcessor` calls
+:func:`~epdfsuite.recalibration.recalibrate_from_isocurve` on the loaded
+image to locate the beam centre from iso-intensity contours.  No manual
+estimate is required.  If the automatic detection fails (unusual image
+geometry, very strong beamstop), the pixel with the maximum intensity is
+used as a safe fallback and a warning is printed.
 
-**Step 2 — Set the initial centre estimate**
+**Step 2 — Inspect and refine the centre if needed**
 
 .. code-block:: python
 
-   proc.initial_center = (338, 271)   # (x, y) in pixels, rough estimate from plot
+   print(proc.center)   # (cx, cy) in pixels — auto-detected
+
+   # Visualise the result (iso-contour overlay):
+   proc.plot_recalibrated_image()
+
+   # Override manually if needed:
+   proc.center = (338, 271)
 
 .. note::
-   This is only an *initial guess*. When ``integrate()`` is called,
-   ePDFsuite automatically refines the beam centre by iteratively
-   detecting the brightest diffraction ring and computing an
-   intensity-weighted centroid until convergence
-   (see :func:`~epdfsuite.recalibration.recalibrate_with_beamstop`).
-   The PONI file is updated internally with the corrected centre.
+   ``proc.center`` is a plain ``(cx, cy)`` tuple; you can read and overwrite
+   it freely at any point before calling ``integrate()``.
 
-**Step 3 — Verify the recalibration**
-
-Before extracting the PDF, it is strongly recommended to check that the
-recalibrated centre is correct:
-
-.. code-block:: python
-
-   proc.plot_recalibrated_image()   # displays image with detected centre and ring overlay
-
-If the detected centre looks wrong, adjust ``initial_center`` and repeat.
-Once satisfied, you can skip recalibration on subsequent calls to speed
-things up:
-
-.. code-block:: python
-
-   proc.skip_center_recalibration = True   # reuse the centre found above
-
-**Step 4 — Integrate and extract the ePDF**
+**Step 3 — Integrate and extract the ePDF**
 
 .. code-block:: python
 
@@ -71,13 +59,11 @@ things up:
 
    # Sample
    sample = SAEDProcessor('sample.dm4', poni_file='calib.poni')
-   sample.initial_center = (338, 271)
 
    # Reference (background / amorphous carbon film)
    ref = SAEDProcessor('reference.dm4', poni_file='calib.poni')
-   ref.initial_center = (335, 268)
 
-   # Verify recalibrations
+   # Verify detected centres
    sample.plot_recalibrated_image()
    ref.plot_recalibrated_image()
 
@@ -90,11 +76,23 @@ things up:
                        interactive=False, plot=True,
                        bgscale=1.0, qmin=1.5, qmax=20, rpoly=1.4)
 
+Passing a custom centre to ``integrate()``
+------------------------------------------
+
+If you need to override the centre for a single integration call without
+permanently changing ``proc.center``, pass it as a keyword argument:
+
+.. code-block:: python
+
+   q, I = proc.integrate(center=(340, 275))
+   # proc.center is now permanently updated to (340, 275)
+
 With MTF deconvolution
 ----------------------
 
-Pass ``mtf_file`` at initialisation to apply Richardson-Lucy deconvolution
-**before** integration. This corrects for the detector point-spread function.
+Pass ``mtf_file`` at initialisation to apply deconvolution **before**
+integration.  The regularisation parameter ``wiener_epsilon`` is read
+automatically from the third column of the MTF file.
 
 .. code-block:: python
 
@@ -102,8 +100,6 @@ Pass ``mtf_file`` at initialisation to apply Richardson-Lucy deconvolution
        'sample.dm4',
        poni_file='calib.poni',
        mtf_file='OneView_2k.mtf',
-       filter='rl',        # 'rl' (Richardson-Lucy) or 'wiener'
-       n_iterations=50,
    )
 
 .. note::
@@ -120,5 +116,6 @@ pixel-scale integrator using the pixel size stored in the DM4 metadata:
 .. code-block:: python
 
    proc = SAEDProcessor('sample.dm4')   # no poni_file
-   proc.initial_center = (512, 512)
+   # proc.center auto-detected; override if needed:
+   proc.center = (512, 512)
    q, I = proc.integrate()

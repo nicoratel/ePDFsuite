@@ -5,7 +5,7 @@ ePDFsuite documentation
 (ePDF) from Selected Area Electron Diffraction (SAED) data.
 
 It handles the full workflow:  
-geometric calibration (pyFAI), MTF deconvolution (Wiener / Richardson-Lucy),
+geometric calibration (pyFAI), MTF deconvolution (Wiener filter),
 azimuthal integration, and PDF computation following the PDFgetX3 formalism.
 
 .. toctree::

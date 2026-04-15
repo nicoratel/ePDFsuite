@@ -35,23 +35,59 @@ The app opens at ``http://localhost:8501``.
 Interface overview
 ------------------
 
-The app is organised in two tabs:
+The app is organised in two tabs.
 
-**Tab 1 — Define Sample and Reference**
+Tab 1 — Define Sample and Reference
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Upload your files and configure the processing parameters:
+Each column (Sample / Reference) follows the same two-step flow:
 
-- **Sample image** — DM4, DM3, tif or tiff diffraction image
+**Step 1 — Upload Files**
+
+- **Image** — DM4, DM3, tif or tiff diffraction image
 - **PONI file** *(optional)* — pyFAI geometric calibration file
-- **Mask file** *(optional)* — EDF mask for invalid pixels or beamstop
-- **MTF file** *(optional)* — for MTF deconvolution (Richardson-Lucy or Wiener)
-- **Reference image** — background / amorphous film image (same format)
+- **Mask file** *(optional)* — EDF mask; or click **🎨 Draw mask** to open
+  the pyFAI-drawmask GUI directly on the loaded image
+- **MTF file** *(optional)* — for detector deconvolution
 
-For each image, a log-scale preview is displayed. Enter the approximate
-beam centre ``(x, y)`` in pixels — the app will automatically refine it
-using the iterative ring-detection algorithm.
+  - When a MTF file is provided, an expander **🔧 MTF Deconvolution Parameters**
+    appears.  The Wiener regularisation parameter ``ε`` is **read automatically
+    from column 3 of the MTF file** and can be adjusted if needed.
 
-**Tab 2 — Extract ePDF**
+For the reference column, PONI, mask and MTF files default to the sample
+values when left empty (a caption indicates which file is reused).
+
+**Step 2 — Create Processor & Detect Centre**
+
+Click **🚀 Create SAEDProcessor** to:
+
+1. Instantiate :class:`~epdfsuite.ePDFsuite.SAEDProcessor` (MTF deconvolution
+   applied here if a MTF file was provided).
+2. Run the iso-intensity contour algorithm automatically to locate the beam
+   centre — no manual estimate required.
+3. Pre-fill the **Center X / Y** number inputs with the detected coordinates.
+
+A log-scale image of the diffraction pattern is displayed with a white
+crosshair at the current centre position.
+
+If detection fails (unusual geometry, very strong beamstop), the pixel with
+the maximum intensity is used as a fallback and a warning is printed in the
+console.
+
+**Refining the centre manually**
+
+Edit the **Center X** and **Center Y** fields as needed, then click
+**🔄 Update** to apply the new coordinates to the processor.  The crosshair
+updates accordingly.
+
+.. note::
+   When you later click **🚀 Calculate PDF** in Tab 2, the centre is
+   synchronised from the number-input fields automatically — the values
+   shown in the boxes are always the ones used for integration, whether
+   they came from auto-detection or manual entry.
+
+Tab 2 — Extract ePDF
+~~~~~~~~~~~~~~~~~~~~~
 
 Adjust the PDF computation parameters with sliders and extract G(r):
 
