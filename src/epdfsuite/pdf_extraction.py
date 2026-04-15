@@ -297,10 +297,21 @@ def compute_ePDF(
     if qmaxinst is None:
         qmaxinst = qmax
     Iraw= Iexp.copy()  # Keep a copy of the raw intensity for plotting
+
+    # --- Interpolate over NaN/Inf bins (from masked radial bins) ---
+    finite_exp = np.isfinite(Iexp)
+    if not np.all(finite_exp):
+        Iexp = np.interp(q, q[finite_exp], Iexp[finite_exp])
+        Iraw = Iexp.copy()
+
     # --- Background subtraction ---
     # First, ensure Iref is on the same q-grid as Iexp by interpolation if needed
     if Iref is not None:
-        if len(Iref) != len(Iexp):
+        finite_ref = np.isfinite(Iref)
+        if not np.all(finite_ref) and finite_ref.any():
+            q_ref_full = np.linspace(q[0], q[-1], len(Iref))
+            Iref = np.interp(q, q_ref_full[finite_ref], Iref[finite_ref])
+        elif len(Iref) != len(Iexp):
             # Create a q-grid for the reference data based on its length
             q_ref = np.linspace(q[0], q[-1], len(Iref))
             # Interpolate reference intensity to match the sample's q-grid
@@ -368,7 +379,9 @@ def compute_ePDF(
         mask_plot = (q >= qmin) & (q <= qmax)
         ax[0].set_xlim([qmin, qmax])
         # set intensity limits to [min(Iexp), max(Iexp)] in the q range
-        ax[0].set_ylim([np.min(Iraw[mask_plot]), np.max(Iraw[mask_plot])])
+        Iraw_valid = Iraw[mask_plot][np.isfinite(Iraw[mask_plot])]
+        if len(Iraw_valid) > 0:
+            ax[0].set_ylim([np.min(Iraw_valid), np.max(Iraw_valid)])
 
         # Plot 2: Corrected structure factor
         ax[1].plot(q, Fc, label=f"rpoly={rpoly:.2f}")

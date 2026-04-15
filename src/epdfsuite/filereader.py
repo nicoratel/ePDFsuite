@@ -312,9 +312,11 @@ def load_data(file, normalize=True, verbose=True):
     wavelength_info = extract_wavelength(metadata)
     
     if camera_key:
+        print(f"  ✓ camera type from database: {camera_key}")
         detector_info = get_detector_params(camera_key)
         detector_info['camera_type'] = camera_key
         detector_info['camera_title'] = camera_title
+        detector_info['binning'] = detector_info['image_height'] / raw_image.shape[0]  # Calculate binning from image dimensions
         
     else:
         # If detector not found, create dict with default values

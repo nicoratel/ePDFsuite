@@ -85,16 +85,16 @@ def perform_geometric_calibration(
     image_file : str
         Path to the DM4 image file of the calibrant diffraction pattern.
     mtf_file : str, optional
-        Path to the MTF file. If provided, Richardson-Lucy deconvolution
-        is applied to the image before calibration.
+        Path to the MTF file. If provided, Wiener deconvolution is applied
+        to the image before calibration.
     """
     
     # load data and metadata
     detector_info, raw_image = load_data(image_file)
     if mtf_file is not None:
         # apply MTF deconvolution to raw image
-        from .utilities import deconvolve_mtf_2d_rl
-        raw_image = deconvolve_mtf_2d_rl(raw_image, mtf_file)
+        from .utilities import deconvolve_mtf_2d
+        raw_image = deconvolve_mtf_2d(raw_image, mtf_file)
     # Define output EDF file name
     edffile = image_file.replace('.dm4', '.edf')
 

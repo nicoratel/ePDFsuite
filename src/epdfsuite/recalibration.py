@@ -1,533 +1,352 @@
 import numpy as np
-from skimage import filters, measure, morphology
-from skimage.transform import hough_ellipse
-from skimage.feature import canny
-from pyFAI import load
-from .filereader import load_data
+from skimage import measure
+from pyFAI.utils.ellipse import fit_ellipse as pyfai_fit_ellipse
 import matplotlib.pyplot as plt
-from matplotlib.patches import Ellipse
 
-"""
-2 possibilities to recalibrate the beam center (poni1, poni2):
+def _fit_circle_algebraic(y_pts, x_pts):
+    """Algebraic (Kåsa) circle fit on a set of 2-D points.
 
-1) Image with beamstop : Fit ellipse to diffraction ring to find center in pixels, then convert to poni
-2) Image without beamstop : Find beam position on camera (e.g. max(intentsity)), then convert to poni
-
-In both cases, we can create an AzimuthalIntegrator with the new poni1, poni2 values.
-
-"""
-
-def recalibrate_with_beamstop(dm4file, ponifile, center_mask_radius=None, threshold_rel=0.5, 
-                              min_size=50, max_iterations=5, convergence_threshold=1.0,
-                              initial_center=None, output_ponifile=None, plot=False, npt=500,
-                              mask=None):
-    """
-    Recalibrate the beam centre from a TEM image with beam stop using pyFAI.
-
-    Iteratively finds the diffraction ring with the highest intensity,
-    thresholds pixels belonging to that ring, and shifts the beam centre
-    by intensity-weighted moments until convergence or the maximum number
-    of iterations is reached.  The returned pyFAI
-    :class:`~pyFAI.azimuthalIntegrator.AzimuthalIntegrator` has
-    ``poni1``/``poni2`` updated to the refined centre.
+    Solves the linearised problem ``Dx + Ey + F = -(x²+y²)`` in the
+    least-squares sense.  More constrained and numerically stabler than
+    a general ellipse fit, especially on partial arcs.
 
     Parameters
     ----------
-    dm4file : str
-        Path to the DM4/DM3/tif image file.
-    ponifile : str
-        Path to the initial pyFAI ``.poni`` calibration file.
-    center_mask_radius : float or None, optional
-        Radius in pixels of the central mask used to exclude the direct
-        beam.  Computed automatically as 7.5 % of the smallest image
-        dimension if ``None``.
-    threshold_rel : float, optional
-        Fraction of the peak ring intensity used as the binarisation
-        threshold. Default is 0.5.
-    min_size : int, optional
-        Minimum connected-component size (pixels) to be kept as a ring
-        candidate. Default is 50.
-    max_iterations : int, optional
-        Maximum number of refinement iterations. Default is 5.
-    convergence_threshold : float, optional
-        Iteration stops when the centre displacement falls below this
-        value in pixels. Default is 1.0.
-    initial_center : tuple of float or None, optional
-        Starting centre ``(x, y)`` in pixels.  Uses the position of
-        maximum intensity if ``None``.
-    output_ponifile : str, optional
-        If provided, the updated ``.poni`` file is written to this path.
-    plot : bool, optional
-        If ``True``, display the image with the detected ring and final
-        centre. Default is ``False``.
-    npt : int, optional
-        Number of radial bins for the pyFAI integration. Default is 500.
-    mask : ndarray or None, optional
-        Boolean mask with the same shape as the image (``True`` = masked).
-        Combined with the beamstop mask internally.
+    y_pts, x_pts : array_like
+        Coordinates of the edge pixels (slow / fast axes).
 
     Returns
     -------
-    ai_updated : AzimuthalIntegrator
-        pyFAI azimuthal integrator with the recalibrated beam centre.
+    x_c, y_c : float
+        Centre coordinates.
+    radius : float
+        Fitted circle radius in pixels.
     """
-
-    # --- Load image ---
-    metadata, image = load_data(dm4file, verbose=False)
-    
-    # --- Load initial poni parameters ---
-    ai = load(ponifile)
-    
-    # Detect binning (pixel grouping)
-    detector_shape = ai.detector.shape
-    binning_y = detector_shape[0] / image.shape[0]
-    binning_x = detector_shape[1] / image.shape[1]
-    if binning_y != 1 or binning_x != 1:
-        print("Image and detector do not have the same size. Check your calibration file.")
-    
-    # Redefine detector to match binned image
-    ai.detector.shape = image.shape
-    ai.detector.pixel1 = ai.detector.pixel1 * binning_y
-    ai.detector.pixel2 = ai.detector.pixel2 * binning_x
-    
-    # --- Initial center estimation ---
-    if initial_center is not None:
-        x_c, y_c = initial_center
-        if plot:
-            print(f"Using user-provided initial center: ({x_c:.1f}, {y_c:.1f})")
-    else:
-        # Use max intensity as initial center
-        x_c, y_c = np.unravel_index(np.argmax(image), image.shape)[::-1]  # x, y order
-        if plot:
-            print(f"Using max intensity as initial center: ({x_c:.1f}, {y_c:.1f})")
-    
-    # --- Define central mask radius if not provided ---
-    if center_mask_radius is None:
-        center_mask_radius = min(image.shape) * 0.075
-    
-    # --- Validate external mask if provided ---
-    external_mask = None
-    if mask is not None:
-        # Convert to boolean array if needed
-        external_mask = np.asarray(mask, dtype=bool)
-        
-        # Verify mask shape matches image
-        if external_mask.shape != image.shape:
-            raise ValueError(f"Mask shape {external_mask.shape} does not match image shape {image.shape}")
-        
-        if plot:
-            print(f"External mask provided")
-            print(f"Masked pixels: {np.sum(external_mask)} / {external_mask.size} ({100*np.sum(external_mask)/external_mask.size:.1f}%)")
-    
-    # --- Iterative refinement ---
-    center_history = [(x_c, y_c)]
-    iteration = 0
-    displacement = float('inf')
-    
-    while displacement >= convergence_threshold:
-        # --- Update center in ai ---
-        fit2d_params = ai.getFit2D()
-        fit2d_params['centerX'] = x_c
-        fit2d_params['centerY'] = y_c
-        ai.setFit2D(**fit2d_params)
-        
-        # --- Create mask to exclude central region (beamstop) ---
-        Y, X = np.ogrid[:image.shape[0], :image.shape[1]]
-        distances = np.sqrt((X - x_c)**2 + (Y - y_c)**2)
-        mask_beamstop = distances <= center_mask_radius
-        
-        # --- Combine masks ---
-        # PyFAI convention: mask=1 means masked (invalid), mask=0 means valid
-        if external_mask is not None:
-            combined_mask = mask_beamstop | external_mask
-        else:
-            combined_mask = mask_beamstop
-        
-        # --- PyFAI radial integration ---
-        radii_mm, intensity = ai.integrate1d(
-            image,
-            npt=npt,
-            mask=combined_mask,
-            unit="r_mm",
-            correctSolidAngle=False,
-            polarization_factor=None
-        )
-        
-        # Find most intense peak (main ring)
-        if len(intensity) == 0:
-            raise ValueError("No ring detected. Check center_mask_radius or image.")
-        
-        peak_idx = np.argmax(intensity)
-        peak_radius_mm = radii_mm[peak_idx]
-        peak_intensity = intensity[peak_idx]
-        
-        # Convert peak radius from mm to pixels
-        pixel_size_mm = ai.detector.pixel1 * 1000  # pixel1 is in meters, convert to mm
-        peak_radius_px = peak_radius_mm / pixel_size_mm
-        
-        # --- Thresholding to isolate ring around peak ---
-        ring_width = peak_radius_px * 0.4  # 40% of peak radius
-        ring_inner = max(center_mask_radius, peak_radius_px - ring_width/2)
-        ring_outer = peak_radius_px + ring_width/2
-        ring_mask = (distances >= ring_inner) & (distances <= ring_outer)
-        
-        # Intensity thresholding in this annular region
-        thresh = peak_intensity * threshold_rel
-        binary = (image > thresh) & ring_mask
-        binary = morphology.remove_small_objects(binary, min_size=min_size)
-        
-        # --- Extract coordinates and calculate center by moments ---
-        coords = np.column_stack(np.where(binary))
-        if len(coords) == 0:
-            raise ValueError("No pixels detected in ring. Adjust threshold_rel.")
-        
-        y = coords[:, 0]
-        x = coords[:, 1]
-        
-        # Center by intensity-weighted average
-        weights = image[y, x]
-        x_c_new = np.average(x, weights=weights)
-        y_c_new = np.average(y, weights=weights)
-        
-        # Check convergence
-        displacement = np.sqrt((x_c_new - x_c)**2 + (y_c_new - y_c)**2)
-        center_history.append((x_c_new, y_c_new))
-        x_c, y_c = x_c_new, y_c_new
-        iteration += 1
-    
-    if plot:
-        if displacement < convergence_threshold:
-            print(f"Convergence reached after {iteration} iterations (displacement: {displacement:.2f} px)")
-        else:
-            print(f"Max iterations ({max_iterations}) reached. Final displacement: {displacement:.2f} px)")
-    
-    # --- Final update of ai with converged center ---
-    fit2d_params = ai.getFit2D()
-    fit2d_params['centerX'] = x_c
-    fit2d_params['centerY'] = y_c
-    ai.setFit2D(**fit2d_params)
-    
-    # --- Ellipse calculation for visualization ---
-    cov = np.cov(x - x_c, y - y_c)
-    evals, evecs = np.linalg.eig(cov)
-    a, b = np.sqrt(evals)
-    angle = np.arctan2(evecs[1, 0], evecs[0, 0])
-    
-    if output_ponifile:
-        ai.write(output_ponifile)
-    
-    # --- Plotting ---
-    if plot:
-        fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(12, 4))
-        
-        # --- Plot 1: Original image with mask ---
-        vmin, vmax = np.percentile(image, [1, 99])
-        # Create display image with masked pixels as NaN (will show as white)
-        img_display = image.copy().astype(float)
-        if external_mask is not None:
-            img_display[external_mask] = np.nan
-        cmap_with_white = plt.get_cmap('gray').copy()
-        cmap_with_white.set_bad(color='white')
-        ax1.imshow(img_display, cmap=cmap_with_white, vmin=vmin, vmax=vmax, origin='upper')
-        
-        # Circle for central mask
-        x_init, y_init = center_history[0]
-        circle = plt.Circle((x_init, y_init), center_mask_radius,
-                           fill=False, edgecolor='cyan', linewidth=2,
-                           linestyle='--', label=f'Central mask (r={center_mask_radius:.0f}px)')
-        ax1.add_patch(circle)
-        
-        # Annular search region
-        circle_inner = plt.Circle((x_c, y_c), ring_inner,
-                                 fill=False, edgecolor='orange', linewidth=1.5,
-                                 linestyle=':', alpha=0.7)
-        circle_outer = plt.Circle((x_c, y_c), ring_outer,
-                                 fill=False, edgecolor='orange', linewidth=1.5,
-                                 linestyle=':', alpha=0.7, label='Search region')
-        ax1.add_patch(circle_inner)
-        ax1.add_patch(circle_outer)
-        
-        # Show center evolution
-        ax1.plot(x_init, y_init, 'b+', markersize=15, markeredgewidth=2,
-                label='Initial center (max intensity)')
-        
-        # Plot intermediate centers if multiple iterations
-        if len(center_history) > 2:
-            for i, (x_h, y_h) in enumerate(center_history[1:-1], 1):
-                ax1.plot(x_h, y_h, 'y+', markersize=10, markeredgewidth=1.5, alpha=0.6)
-        
-        ax1.plot(x_c, y_c, 'g+', markersize=15, markeredgewidth=2,
-                label=f'Final center ({len(center_history)-1} iter.)')
-        
-        ax1.set_xlabel('X (pixels)', fontsize=12)
-        ax1.set_ylabel('Y (pixels)', fontsize=12)
-        ax1.set_title(f'Image and search region (Orientation: {ai.detector.orientation})', fontsize=14)
-        ax1.legend(fontsize=10, loc='lower right')
-        ax1.grid(True, alpha=0.3)
-        
-        # --- Plot 2: Radial profile (PyFAI) ---
-        ax2.plot(radii_mm, intensity, 'b-', linewidth=2, label='Radial profile (PyFAI)')
-        ax2.axvline(peak_radius_mm, color='red', linestyle='--', linewidth=2,
-                   label=f'Main peak (r={peak_radius_mm:.3f} mm, {peak_radius_px:.1f}px)')
-        ax2.axhline(thresh, color='orange', linestyle='--', linewidth=1.5,
-                   label=f'Threshold ({threshold_rel:.2f}×max)')
-        
-        ax2.set_xlabel('Radius (mm)', fontsize=12)
-        ax2.set_ylabel('Mean intensity', fontsize=12, color='b')
-        ax2.set_title('Radial intensity profile (PyFAI)', fontsize=14)
-        ax2.legend(fontsize=10, loc='upper right')
-        ax2.grid(True, alpha=0.3)
-        
-        # --- Plot 3: Image with detected ellipse ---
-        # Reuse the same display image with masked pixels as white
-        ax3.imshow(img_display, cmap=cmap_with_white, vmin=vmin, vmax=vmax, origin='upper')
-        
-        # Display detected pixels
-        ax3.contour(binary, levels=[0.5], colors='yellow', linewidths=1,
-                   linestyles='-', alpha=0.6, label='Detected pixels')
-        
-        # Calculated ellipse
-        angle_deg = np.degrees(angle)
-        ellipse = Ellipse(xy=(x_c, y_c), width=4*a, height=4*b, angle=angle_deg,
-                         fill=False, edgecolor='red', linewidth=2.5,
-                         label=f'Ellipse (a={2*a:.1f}, b={2*b:.1f}px)')
-        ax3.add_patch(ellipse)
-        
-        ax3.plot(x_c, y_c, 'g+', markersize=15, markeredgewidth=2,
-                label='Detected center')
-        
-        ax3.set_xlabel('X (pixels)', fontsize=12)
-        ax3.set_ylabel('Y (pixels)', fontsize=12)
-        ax3.set_title('Detected ring and center', fontsize=14)
-        ax3.legend(fontsize=10, loc='lower right')
-        ax3.grid(True, alpha=0.3)
-        
-        fig.tight_layout()
-        plt.show()
-
-    return ai
+    x = np.asarray(x_pts, dtype=float)
+    y = np.asarray(y_pts, dtype=float)
+    A = np.column_stack([x, y, np.ones_like(x)])
+    b = -(x ** 2 + y ** 2)
+    result, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
+    D, E, F = result
+    x_c = -D / 2.0
+    y_c = -E / 2.0
+    r2 = x_c ** 2 + y_c ** 2 - F
+    if r2 <= 0:
+        raise ValueError("Circle fit produced a negative radius squared. Check input points.")
+    return x_c, y_c, float(np.sqrt(r2))
 
 
-def recalibrate_with_beamstop_noponi(image, center_mask_radius=None, threshold_rel=0.5,
-                                           min_size=50, max_iterations=5, convergence_threshold=1.0,
-                                           initial_center=None, plot=False):
-    """
-    Recalibrate the beam centre from a TEM image with beam stop (no PONI file).
 
-    Uses an iterative ring detection approach:
 
-    1. Estimate the initial centre from the maximum intensity or a user-supplied value.
-    2. Mask the central region to exclude the direct beam.
-    3. Detect the most intense diffraction ring via a radial profile.
-    4. Threshold pixels belonging to that ring and compute an intensity-weighted centroid.
-    5. Repeat until convergence or ``max_iterations`` is reached.
+
+# ============================================================
+# Iso-intensity contour method (amorphous halo + large beamstop)
+# ============================================================
+
+def recalibrate_from_isocurve(image, n_levels=7, level_range=(0.15, 0.75),
+                               min_points=40, fit_circle=True,
+                               rms_rel_max=0.15, min_arc_deg=60.0,
+                               cluster_window=15.0,
+                               initial_center=None, max_center_offset=None,
+                               mask=None, plot=False):
+    """Find the beam centre from iso-intensity contours of an amorphous halo.
+
+    For amorphous specimens the scattered intensity decreases monotonically
+    from the direct beam, so iso-intensity lines are approximately circular
+    arcs centred on the beam.  This method:
+
+    1. Computes intensity percentiles on *valid* (unmasked) pixels only,
+       then sets masked pixels to 0 so they do not generate contours.
+    2. Samples *n_levels* intensity levels across *level_range*.
+    3. Extracts iso-intensity contours with ``skimage.measure.find_contours``.
+    4. Discards contour points that fall inside the masked region.
+    5. Fits a circle (Kasa algebraic method) to each surviving contour.
+    6. Filters by circularity: keeps only fits where ``rms / R < rms_rel_max``
+       (rejects non-circular contours such as mask edges or noise).
+    7. Filters by arc span: keeps only fits whose angular coverage around
+       the fitted centre exceeds *min_arc_deg* (rejects very short arcs that
+       produce biased Kasa estimates).
+    8. If *initial_center* is provided, additionally discards fits whose
+       centre is farther than *max_center_offset* pixels from that estimate.
+    9. **Clusters** the surviving centre estimates: computes a robust median,
+       then discards outliers whose centre deviates from it by more than
+       *cluster_window* pixels.
+    10. Returns the **median** of the final cluster.
 
     Parameters
     ----------
     image : ndarray
-        TEM image as a 2D numpy array.
-    center_mask_radius : float or None, optional
-        Radius in pixels of the central mask excluding direct beam scattering.
-        Computed automatically as 7.5 % of the smallest image dimension if ``None``.
-    threshold_rel : float, optional
-        Fraction of peak ring intensity used for binarisation. Default is 0.5.
-    min_size : int, optional
-        Minimum connected-component size (pixels) to keep as a ring candidate.
-        Default is 50.
-    max_iterations : int, optional
-        Maximum number of refinement iterations. Default is 5.
-    convergence_threshold : float, optional
-        Stop when the centre displacement falls below this value in pixels.
-        Default is 1.0.
+        2-D image as a numpy array.
+    n_levels : int, optional
+        Number of iso-intensity levels to sample.  Default is 7.
+    level_range : tuple of float, optional
+        ``(low, high)`` as fractions of the visible (unmasked) intensity
+        range after hot-pixel clipping.  Default is ``(0.15, 0.75)``.
+    min_points : int, optional
+        Minimum number of unmasked contour points required to attempt a
+        fit.  Default is 40.
+    fit_circle : bool, optional
+        If ``True`` (default), fit a circle (3 parameters, more stable
+        on partial arcs).  If ``False``, fit a general ellipse.
+    rms_rel_max : float, optional
+        Maximum allowed normalised RMS residual ``rms / R`` to accept a
+        contour as circular.  Default is ``0.15`` (15 % of radius).
+        Increase if the halo is slightly elliptical; decrease to be stricter.
+    min_arc_deg : float, optional
+        Minimum angular span (degrees) of the arc around the fitted centre
+        required to accept the contour.  Default is ``60.0``.  Short arcs
+        (beamstop edge, noise patch) are rejected.
     initial_center : tuple of float or None, optional
-        Starting centre ``(x, y)`` in pixels.
-        Uses the position of maximum intensity if ``None``.
+        Rough centre ``(x, y)`` in pixels used to filter out geometrically
+        implausible circle fits.  When ``None`` no distance filtering is
+        applied.
+    cluster_window : float, optional
+        Radius (pixels) of the final clustering window.  After all per-contour
+        fits have passed the circularity and arc-span filters, a robust median
+        is computed and any estimate farther than *cluster_window* pixels from
+        it is discarded as an outlier before computing the final centre.
+        Default is ``15.0``.
+    max_center_offset : float or None, optional
+        Maximum allowed distance (pixels) between a per-contour fitted
+        centre and *initial_center*.  Defaults to 25 % of the smallest
+        image dimension when *initial_center* is provided.
+    mask : ndarray of bool or None, optional
+        Boolean mask where ``True`` marks *invalid* pixels (beamstop,
+        detector edge, etc.).
     plot : bool, optional
-        If ``True``, display the image with the detected ring and final centre.
-        Default is ``False``.
+        Show a diagnostic figure.  Default is ``False``.
 
     Returns
     -------
     x_c : float
-        X coordinate of the beam centre in pixels.
+        X coordinate of the beam centre (pixels).
     y_c : float
-        Y coordinate of the beam centre in pixels.
+        Y coordinate of the beam centre (pixels).
     """
-    
-    # --- Initial center estimation ---
+    img = image.astype(float)
+    h, w = img.shape
+
+    # Boolean mask of invalid pixels
+    invalid = np.asarray(mask, dtype=bool) if mask is not None \
+        else np.zeros(img.shape, dtype=bool)
+
+    # --- Normalise using only VALID pixels ---
+    valid_vals = img[~invalid]
+    if valid_vals.size == 0:
+        raise ValueError("recalibrate_from_isocurve: mask covers entire image.")
+    vmin_clip = np.percentile(valid_vals, 1)
+    vmax_clip = np.percentile(valid_vals, 99)
+    img_norm = np.clip((img - vmin_clip) / (vmax_clip - vmin_clip + 1e-10),
+                       0.0, 1.0)
+    # Masked pixels → 0 so find_contours does not generate artefact contours
+    # along the mask boundary
+    img_norm[invalid] = 0.0
+
+    levels = np.linspace(level_range[0], level_range[1], n_levels)
+
+    # Distance filter based on initial centre
     if initial_center is not None:
-        x_c, y_c = initial_center
-        x_init, y_init = x_c, y_c
-        if plot:
-            print(f"Using user-provided initial center: ({x_c:.1f}, {y_c:.1f})")
+        x_rough, y_rough = float(initial_center[0]), float(initial_center[1])
+        _offset_limit = max_center_offset if max_center_offset is not None \
+            else min(h, w) * 0.25
     else:
-        # Use max intensity as initial center
-        y_init, x_init = np.unravel_index(np.argmax(image), image.shape)
-        x_c, y_c = x_init, y_init
-        if plot:
-            print(f"Using max intensity as initial center: ({x_c:.1f}, {y_c:.1f})")
-    
-    # Define central mask radius if not provided
-    if center_mask_radius is None:
-        center_mask_radius = min(image.shape) * 0.075
-    
-    # --- Iterative refinement ---
-    center_history = [(x_c, y_c)]
-    iteration = 0
-    displacement = float('inf')
-    
-    while displacement >= convergence_threshold and iteration < max_iterations:
-        # --- Create mask to exclude central region ---
-        Y, X = np.ogrid[:image.shape[0], :image.shape[1]]
-        distances = np.sqrt((X - x_c)**2 + (Y - y_c)**2)
-        mask_central = distances > center_mask_radius
-        
-        # --- Calculate radial profile to identify most intense ring ---
-        max_radius = int(np.sqrt((image.shape[0]/2)**2 + (image.shape[1]/2)**2))
-        radial_profile = np.zeros(max_radius)
-        radial_counts = np.zeros(max_radius)
-        
-        for r in range(int(center_mask_radius), max_radius):
-            ring_mask = (distances >= r) & (distances < r + 1)
-            ring_pixels = image[ring_mask]
-            if len(ring_pixels) > 0:
-                radial_profile[r] = np.mean(ring_pixels)
-                radial_counts[r] = len(ring_pixels)
-        
-        # Find most intense peak (main ring)
-        valid_radii = np.where(radial_counts > 0)[0]
-        if len(valid_radii) == 0:
-            raise ValueError("No ring detected. Check center_mask_radius or image.")
-        
-        peak_radius_idx = valid_radii[np.argmax(radial_profile[valid_radii])]
-        peak_intensity = radial_profile[peak_radius_idx]
-        
-        # --- Thresholding to isolate ring around peak ---
-        ring_width = peak_radius_idx * 0.4  # 40% of peak radius
-        ring_inner = max(center_mask_radius, peak_radius_idx - ring_width/2)
-        ring_outer = peak_radius_idx + ring_width/2
-        ring_mask = (distances >= ring_inner) & (distances <= ring_outer)
-        
-        # Intensity thresholding in this annular region
-        thresh = peak_intensity * threshold_rel
-        binary = (image > thresh) & ring_mask
-        binary = morphology.remove_small_objects(binary, min_size=min_size)
-        
-        # --- Extract coordinates and calculate center by moments ---
-        coords = np.column_stack(np.where(binary))
-        if len(coords) == 0:
-            raise ValueError("No pixels detected in ring. Adjust threshold_rel.")
-        
-        y = coords[:, 0]
-        x = coords[:, 1]
-        
-        # Center by intensity-weighted average
-        weights = image[y, x]
-        x_c_new = np.average(x, weights=weights)
-        y_c_new = np.average(y, weights=weights)
-        
-        # Check convergence
-        displacement = np.sqrt((x_c_new - x_c)**2 + (y_c_new - y_c)**2)
-        center_history.append((x_c_new, y_c_new))
-        x_c, y_c = x_c_new, y_c_new
-        iteration += 1
-    
+        x_rough, y_rough = None, None
+        _offset_limit = None
+
+    # Accepted contours (used for median)
+    x_centers, y_centers, rms_list = [], [], []
+    # Rejected contours stored for diagnostic plot only
+    # Each entry: (xs_plot, ys_plot, reason_string)
+    _rejected = []
+
+    for level in levels:
+        for cnt in measure.find_contours(img_norm, level):
+            # find_contours returns (row, col) == (y, x)
+            ys_all = cnt[:, 0]
+            xs_all = cnt[:, 1]
+
+            # Remove points that fall inside the mask
+            yi = np.clip(np.round(ys_all).astype(int), 0, h - 1)
+            xi = np.clip(np.round(xs_all).astype(int), 0, w - 1)
+            valid_pts = ~invalid[yi, xi]
+            ys, xs = ys_all[valid_pts], xs_all[valid_pts]
+
+            if len(xs) < min_points:
+                continue
+
+            try:
+                if fit_circle:
+                    x_c_i, y_c_i, r_i = _fit_circle_algebraic(ys, xs)
+                    r_pred = np.sqrt((xs - x_c_i) ** 2 + (ys - y_c_i) ** 2)
+                    rms = float(np.std(r_pred - r_i))
+                else:
+                    params = pyfai_fit_ellipse(np.column_stack([ys, xs]))
+                    y_c_i, x_c_i = params[0], params[1]
+                    r_i = np.sqrt((xs - x_c_i) ** 2 + (ys - y_c_i) ** 2).mean()
+                    rms = 0.0
+
+                # Reject centres outside image bounds
+                if not (0 <= x_c_i < w and 0 <= y_c_i < h):
+                    _rejected.append((xs, ys, 'out of bounds'))
+                    continue
+
+                # --- Circularity filter: rms / R ---
+                rms_rel = rms / r_i if r_i > 0 else np.inf
+                if rms_rel > rms_rel_max:
+                    _rejected.append((xs, ys, f'rms/R={rms_rel:.2f}'))
+                    continue
+
+                # --- Arc span filter ---
+                angles = np.arctan2(ys - y_c_i, xs - x_c_i)
+                angles_sorted = np.sort(angles)
+                gaps = np.diff(angles_sorted)
+                wrap_gap = 2.0 * np.pi - (angles_sorted[-1] - angles_sorted[0])
+                largest_gap = max(float(gaps.max()), wrap_gap)
+                arc_span_deg = float(np.degrees(2.0 * np.pi - largest_gap))
+                if arc_span_deg < min_arc_deg:
+                    _rejected.append((xs, ys, f'arc={arc_span_deg:.0f}°'))
+                    continue
+
+                # --- Distance from initial centre ---
+                if x_rough is not None:
+                    dist = np.sqrt((x_c_i - x_rough) ** 2 + (y_c_i - y_rough) ** 2)
+                    if dist > _offset_limit:
+                        _rejected.append((xs, ys, 'too far'))
+                        continue
+
+                x_centers.append(x_c_i)
+                y_centers.append(y_c_i)
+                rms_list.append(rms)
+            except Exception:
+                continue
+
+    if len(x_centers) == 0:
+        raise ValueError(
+            "recalibrate_from_isocurve: no valid contour fit found. "
+            "Try adjusting level_range, n_levels, min_points, rms_rel_max, "
+            "min_arc_deg, or increase max_center_offset."
+        )
+
+    x_centers = np.array(x_centers)
+    y_centers = np.array(y_centers)
+    rms_arr = np.array(rms_list)
+
+    # --- Cluster-based outlier rejection ---
+    # 1. Robust initial estimate via median
+    x_med0 = float(np.median(x_centers))
+    y_med0 = float(np.median(y_centers))
+    # 2. Keep only centres within cluster_window of that estimate
+    dist_to_med = np.sqrt((x_centers - x_med0) ** 2 + (y_centers - y_med0) ** 2)
+    in_cluster = dist_to_med <= cluster_window
+    if in_cluster.sum() == 0:          # safety fallback
+        in_cluster = np.ones(len(x_centers), dtype=bool)
+    # 3. Final centre = median of the cluster
+    x_c = float(np.median(x_centers[in_cluster]))
+    y_c = float(np.median(y_centers[in_cluster]))
+
     if plot:
-        if displacement < convergence_threshold:
-            print(f"Convergence reached after {iteration} iterations (displacement: {displacement:.2f} px)")
-        else:
-            print(f"Max iterations ({max_iterations}) reached. Final displacement: {displacement:.2f} px)")
-    
-    # --- Ellipse calculation for visualization ---
-    cov = np.cov(x - x_c, y - y_c)
-    evals, evecs = np.linalg.eig(cov)
-    a, b = np.sqrt(evals)
-    angle = np.arctan2(evecs[1, 0], evecs[0, 0])
-    
-    if plot:
-        fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(12, 4))
-        
-        # --- Plot 1: Original image with mask ---
-        vmin, vmax = np.percentile(image, [1, 99])
-        ax1.imshow(image, cmap='gray', vmin=vmin, vmax=vmax, origin='upper')
-        
-        # Circle for central mask
-        circle = plt.Circle((x_init, y_init), center_mask_radius,
-                           fill=False, edgecolor='cyan', linewidth=2,
-                           linestyle='--', label=f'Central mask (r={center_mask_radius:.0f}px)')
-        ax1.add_patch(circle)
-        
-        # Annular search region
-        circle_inner = plt.Circle((x_init, y_init), ring_inner,
-                                 fill=False, edgecolor='orange', linewidth=1.5,
-                                 linestyle=':', alpha=0.7)
-        circle_outer = plt.Circle((x_init, y_init), ring_outer,
-                                 fill=False, edgecolor='orange', linewidth=1.5,
-                                 linestyle=':', alpha=0.7, label='Search region')
-        ax1.add_patch(circle_inner)
-        ax1.add_patch(circle_outer)
-        
-        # Show center evolution
-        ax1.plot(x_init, y_init, 'b+', markersize=15, markeredgewidth=2,
-                label='Initial center (max intensity)')
-        
-        # Plot intermediate centers if multiple iterations
-        if len(center_history) > 2:
-            for i, (x_h, y_h) in enumerate(center_history[1:-1], 1):
-                ax1.plot(x_h, y_h, 'y+', markersize=10, markeredgewidth=1.5, alpha=0.6)
-        
-        ax1.plot(x_c, y_c, 'g+', markersize=15, markeredgewidth=2,
-                label=f'Final center ({len(center_history)-1} iter.)')
-        
-        ax1.set_xlabel('X (pixels)', fontsize=12)
-        ax1.set_ylabel('Y (pixels)', fontsize=12)
-        ax1.set_title('Image and search region', fontsize=14)
-        ax1.legend(fontsize=10, loc='lower right')
-        ax1.grid(True, alpha=0.3)
-        
-        # --- Plot 2: Radial profile ---
-        ax2.plot(valid_radii, radial_profile[valid_radii], 'b-', linewidth=2, label='Radial profile')
-        ax2.axvline(peak_radius_idx, color='red', linestyle='--', linewidth=2,
-                   label=f'Main peak (r={peak_radius_idx}px)')
-        ax2.axhline(thresh, color='orange', linestyle='--', linewidth=1.5,
-                   label=f'Threshold ({threshold_rel:.2f}×max)')
-        ax2.axvline(ring_inner, color='green', linestyle=':', linewidth=1.5, alpha=0.7)
-        ax2.axvline(ring_outer, color='green', linestyle=':', linewidth=1.5, alpha=0.7,
-                   label='Annular region')
-        
-        ax2.set_xlabel('Radius (pixels)', fontsize=12)
-        ax2.set_ylabel('Mean intensity', fontsize=12, color='b')
-        ax2.set_title('Radial intensity profile', fontsize=14)
-        ax2.legend(fontsize=10, loc='upper right')
-        ax2.grid(True, alpha=0.3)
-        
-        # --- Plot 3: Image with detected ellipse ---
-        ax3.imshow(image, cmap='gray', vmin=vmin, vmax=vmax, origin='upper')
-        
-        # Display detected pixels
-        ax3.contour(binary, levels=[0.5], colors='yellow', linewidths=1,
-                   linestyles='-', alpha=0.6, label='Detected pixels')
-        
-        # Calculated ellipse
-        angle_deg = np.degrees(angle)
-        ellipse = Ellipse(xy=(x_c, y_c), width=4*a, height=4*b, angle=angle_deg,
-                         fill=False, edgecolor='red', linewidth=2.5,
-                         label=f'Ellipse (a={2*a:.1f}, b={2*b:.1f}px)')
-        ax3.add_patch(ellipse)
-        
-        ax3.plot(x_c, y_c, 'g+', markersize=15, markeredgewidth=2,
-                label='Detected center')
-        
-        ax3.set_xlabel('X (pixels)', fontsize=12)
-        ax3.set_ylabel('Y (pixels)', fontsize=12)
-        ax3.set_title('Detected ring and center', fontsize=14)
-        ax3.legend(fontsize=10, loc='lower right')
-        ax3.grid(True, alpha=0.3)
-        
+        vmin_d = np.percentile(valid_vals, 1)
+        vmax_d = np.percentile(valid_vals, 99)
+        img_display = img.copy()
+        img_display[invalid] = np.nan
+        cmap_w = plt.get_cmap('gray').copy()
+        cmap_w.set_bad(color='white')
+
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+        # Panel 1: image + contours
+        axes[0].imshow(img_display, cmap=cmap_w, vmin=vmin_d, vmax=vmax_d,
+                       origin='upper')
+
+        # Draw rejected contours in light grey
+        _rej_drawn = False
+        for (xs_r, ys_r, _reason) in _rejected:
+            axes[0].plot(xs_r, ys_r, color='#aaaaaa', lw=0.6, alpha=0.4,
+                         label='_' if _rej_drawn else 'Rejected (non-circular / short arc)')
+            _rej_drawn = True
+
+        # Draw accepted contours in colour (cycle through tab10)
+        cmap_tab = plt.get_cmap('tab10')
+        _seen_levels = {}
+        for level in levels:
+            for cnt in measure.find_contours(img_norm, level):
+                yi = np.clip(np.round(cnt[:, 0]).astype(int), 0, h - 1)
+                xi = np.clip(np.round(cnt[:, 1]).astype(int), 0, w - 1)
+                v = ~invalid[yi, xi]
+                if v.sum() < min_points:
+                    continue
+                # Check if this contour was accepted: refit and recheck
+                ys_v, xs_v = cnt[v, 0], cnt[v, 1]
+                try:
+                    xci, yci, ri = _fit_circle_algebraic(ys_v, xs_v)
+                    r_pred = np.sqrt((xs_v - xci) ** 2 + (ys_v - yci) ** 2)
+                    rms_i = float(np.std(r_pred - ri))
+                    rr = rms_i / ri if ri > 0 else np.inf
+                    ang = np.arctan2(ys_v - yci, xs_v - xci)
+                    ang_s = np.sort(ang)
+                    lg = max(float(np.diff(ang_s).max()),
+                             2 * np.pi - (ang_s[-1] - ang_s[0]))
+                    span = float(np.degrees(2 * np.pi - lg))
+                    in_bounds = (0 <= xci < w and 0 <= yci < h)
+                    near = True
+                    if x_rough is not None:
+                        near = np.sqrt((xci - x_rough) ** 2 + (yci - y_rough) ** 2) <= _offset_limit
+                    accepted = in_bounds and rr <= rms_rel_max and span >= min_arc_deg and near
+                except Exception:
+                    accepted = False
+
+                if accepted:
+                    idx = list(levels).index(level) if level in list(levels) else 0
+                    color = cmap_tab(idx % 10)
+                    lbl = f'level={level:.2f}' if level not in _seen_levels else '_'
+                    _seen_levels[level] = True
+                    axes[0].plot(xs_v, ys_v, color=color, lw=1.2, alpha=0.85,
+                                 label=lbl)
+
+        if x_rough is not None:
+            axes[0].plot(x_rough, y_rough, 'b+', markersize=14,
+                         markeredgewidth=2,
+                         label=f'Initial ({x_rough:.0f}, {y_rough:.0f})')
+        axes[0].plot(x_c, y_c, 'r+', markersize=16, markeredgewidth=2.5,
+                     label=f'Centre ({x_c:.1f}, {y_c:.1f})')
+        axes[0].set_title('Iso-intensity contours', fontsize=13)
+        axes[0].legend(fontsize=8, loc='lower right')
+        axes[0].grid(True, alpha=0.3)
+
+        # Panel 2: cluster members coloured by RMS, outliers as grey ×
+        if (~in_cluster).any():
+            axes[1].scatter(x_centers[~in_cluster], y_centers[~in_cluster],
+                            color='#aaaaaa', s=40, marker='x', zorder=2, linewidths=1.5,
+                            label=f'Outliers (>{cluster_window:.0f} px) '
+                                  f'[{int((~in_cluster).sum())}]')
+        sc = axes[1].scatter(x_centers[in_cluster], y_centers[in_cluster],
+                             c=rms_arr[in_cluster], cmap='RdYlGn_r', s=40, zorder=3,
+                             label=f'Cluster [{int(in_cluster.sum())}]')
+        plt.colorbar(sc, ax=axes[1], label='RMS residual (px)')
+        if x_rough is not None:
+            axes[1].plot(x_rough, y_rough, 'b+', markersize=14,
+                         markeredgewidth=2,
+                         label=f'Initial ({x_rough:.0f}, {y_rough:.0f})')
+        axes[1].plot(x_c, y_c, 'r*', markersize=18, zorder=4,
+                     label=f'Median ({x_c:.1f}, {y_c:.1f})')
+        axes[1].set_title('Centre estimates – cluster analysis', fontsize=13)
+        axes[1].legend(fontsize=9)
+        axes[1].set_aspect('equal', 'box')
+        axes[1].invert_yaxis()
+        axes[1].grid(True, alpha=0.3)
+
+        for ax in axes:
+            ax.set_xlabel('X (pixels)', fontsize=11)
+            ax.set_ylabel('Y (pixels)', fontsize=11)
+        n_rej = len(_rejected)
+        n_out = int((~in_cluster).sum())
+        fig.suptitle(
+            f'recalibrate_from_isocurve  |  cluster: {int(in_cluster.sum())} pts'
+            f'  |  outliers: {n_out}  |  shape-rejected: {n_rej}'
+            f'  |  centre = ({x_c:.2f}, {y_c:.2f}) px',
+            fontsize=11
+        )
         fig.tight_layout()
         plt.show()
-    
+
     return x_c, y_c
-
-
-

@@ -239,7 +239,7 @@ def compute_mtf_slanted_edge(image_path,
     if mask is not None:
         import fabio
         maskdata = fabio.open(mask).data
-        image = image.copy()
+        image = image.astype(float)
         image[maskdata != 0] = np.nan
 
     # ------------------------------------------------------------------
@@ -580,7 +580,7 @@ def extract_noise_and_signal_patches(image, edge_line, band_width=500, noise_box
     noise_box : ignored
         Reserved for future use.
     erosion_px : int, optional
-        Width of the exclusion zone on each side of the edge (pixels). Default is 5.
+        Width of the exclusion zone on each side of the edge (pixels). Default is 10.
 
     Returns
     -------
@@ -869,6 +869,7 @@ def deconvolve_mtf_2d(image, mtf_file, clip=True,
 def deconvolve_mtf_2d_rl(image, mtf_file, clip=True,
                           n_iterations=50,
                           tol=1e-2,
+                          dqe_file=None,
                           pre_smooth_sigma=0,
                           verbose=False,
                           plot=False):
@@ -884,6 +885,27 @@ def deconvolve_mtf_2d_rl(image, mtf_file, clip=True,
 
         \\text{rel} = \\frac{\\|u^{(k+1)} - u^{(k)}\\|_\\infty}{\\|u^{(k)}\\|_\\infty} < \\text{tol}
 
+    **DQE-weighted correction (optional)**
+
+    When ``dqe_file`` is provided, the back-projection step is weighted by the
+    2D DQE map instead of the plain MTF conjugate:
+
+    .. math::
+
+        u^{(k+1)} = u^{(k)} \\cdot \\mathcal{F}^{-1}\\!\\left[
+            \\mathrm{DQE}(f)\\, H(f)\\,
+            \\mathcal{F}\\!\\left[\\frac{I}{h \\circledast u^{(k)}}\\right]
+        \\right]
+
+    where :math:`\\mathrm{DQE}(f) = \\mathrm{MTF}^2(f) / (\\bar{n}\\,\\mathrm{NPS}(f))`.
+    Frequencies where :math:`\\mathrm{DQE}(f) \\approx 0` (noise-dominated) are
+    naturally suppressed at every iteration, making the algorithm less sensitive
+    to the choice of ``n_iterations`` and removing the need for
+    ``pre_smooth_sigma`` in most cases.
+
+    Without ``dqe_file`` the standard R-L update is used and regularisation
+    relies entirely on early stopping via ``tol`` and ``n_iterations``.
+
     Parameters
     ----------
     image : ndarray
@@ -896,8 +918,15 @@ def deconvolve_mtf_2d_rl(image, mtf_file, clip=True,
     n_iterations : int, optional
         Maximum number of iterations (safety cap). Default is 50.
     tol : float or None, optional
-        Early-stopping threshold on the relative change ``||\u0394u||/||u||``.
+        Early-stopping threshold on the relative change ``||Δu||/||u||``.
         ``None`` disables early stopping. Default is ``1e-2``.
+    dqe_file : str or None, optional
+        Path to the DQE file (same format as ``mtf_file``: columns are
+        frequency in cyc/px and DQE value in [0, 1]).  When provided, the
+        correction at each iteration is weighted by the 2D DQE map, which
+        suppresses noise-dominated frequencies without requiring aggressive
+        early stopping or pre-smoothing.  ``None`` disables DQE weighting
+        and reproduces the standard R-L behaviour. Default is ``None``.
     pre_smooth_sigma : float, optional
         Standard deviation (pixels) for Gaussian pre-smoothing applied
         before deconvolution. ``0`` disables smoothing. Default is ``0``.
@@ -924,6 +953,36 @@ def deconvolve_mtf_2d_rl(image, mtf_file, clip=True,
         freq_1d = np.concatenate([[0.0], freq_1d])
         mtf_1d  = np.concatenate([[1.0], mtf_1d])
 
+    # RL requires a normalised PSF: H(0) = 1 (total energy is conserved).
+    # If MTF(DC) < 1, each iteration multiplies the estimate by MTF(0)^2 < 1,
+    # driving it to zero after enough iterations.
+    # Normalise here so RL is independent of the absolute MTF calibration.
+    _mtf_dc = np.interp(0.0, freq_1d, mtf_1d)
+    if _mtf_dc <= 0:
+        raise ValueError(
+            f"[RL] MTF value at DC = {_mtf_dc:.4g} ≤ 0. "
+            "Check that column 1 of the MTF file contains MTF values (not epsilon)."
+        )
+    if abs(_mtf_dc - 1.0) > 1e-3:
+        print(
+            f"[RL] MTF(DC) = {_mtf_dc:.4f} ≠ 1.0 — normalising by MTF(DC). "
+            "Without this, each RL iteration multiplies the estimate by "
+            f"MTF(DC)² = {_mtf_dc**2:.4f}, collapsing the image to zero."
+        )
+        mtf_1d = mtf_1d / _mtf_dc
+
+
+    # ------------------------------------------------------------------
+    if dqe_file is not None:
+        dqe_data = np.loadtxt(dqe_file, comments='#')
+        if dqe_data.ndim != 2 or dqe_data.shape[1] < 2:
+            raise ValueError("DQE file must have 2 columns: freq (cyc/px) and DQE.")
+        dqe_freq_1d = dqe_data[:, 0]
+        dqe_1d      = dqe_data[:, 1]
+        if dqe_freq_1d[0] > 0:
+            dqe_freq_1d = np.concatenate([[0.0], dqe_freq_1d])
+            dqe_1d      = np.concatenate([[1.0], dqe_1d])
+
     # ------------------------------------------------------------------
     # 2. Handle NaNs
     # ------------------------------------------------------------------
@@ -949,7 +1008,22 @@ def deconvolve_mtf_2d_rl(image, mtf_file, clip=True,
     fx = np.fft.fftfreq(nx)
     FX, FY = np.meshgrid(fx, fy)
     freq_radial = np.sqrt(FX**2 + FY**2)
-    mtf_2d = np.interp(freq_radial, freq_1d, mtf_1d, left=1.0, right=0.0)
+
+    # For RL, the PSF must be non-negative everywhere to prevent divergence.
+    # Using right=0.0 (hard cut beyond the last tabulated frequency) creates a
+    # sharp edge that causes Gibbs oscillations: the PSF goes negative in the
+    # spatial domain, and the clip(correction, 0) in the RL loop kills pixels
+    # at every iteration → image collapses to zero.
+    # Fix: hold the last tabulated MTF value for frequencies beyond the table.
+    # The MTF at the table edge (~0.1) is small → negligible amplification,
+    # but the PSF remains smooth and positive.
+    mtf_2d = np.interp(freq_radial, freq_1d, mtf_1d, left=1.0, right=mtf_1d[-1])
+
+    # Build 2D DQE map if provided
+    if dqe_file is not None:
+        dqe_2d = np.interp(freq_radial, dqe_freq_1d, dqe_1d, left=1.0, right=0.0)
+    else:
+        dqe_2d = None
 
     # ------------------------------------------------------------------
     # 5. Richardson-Lucy algorithm
@@ -976,8 +1050,11 @@ def deconvolve_mtf_2d_rl(image, mtf_file, clip=True,
         ratio     = I / Hu
         ratio_fft = np.fft.fft2(ratio)
 
-        # Correlation with the flipped PSF
-        correction = np.real(np.fft.ifft2(Ht * ratio_fft))
+        # Correlation with the flipped PSF, weighted by DQE if available
+        if dqe_2d is not None:
+            correction = np.real(np.fft.ifft2(dqe_2d * Ht * ratio_fft))
+        else:
+            correction = np.real(np.fft.ifft2(Ht * ratio_fft))
 
         # Update
         u = u * np.clip(correction, 0, None)
@@ -1047,6 +1124,206 @@ def deconvolve_mtf_2d_rl(image, mtf_file, clip=True,
     #print(f"       Output range: [{np.nanmin(image_deconv):.1f}, {np.nanmax(image_deconv):.1f}]")
 
     return image_deconv
+
+## Function to compute DQE from flat and dark images, and MTF file
+
+
+def compute_dqe(flat_paths, dark_paths, mtf_file,
+                gain_reference=None,
+                n_freq=128,
+                plot=False,
+                save=None):
+    """
+    Compute the radially-averaged DQE from flat-field and dark-field images.
+
+    The DQE is defined as:
+
+    .. math::
+
+        \\mathrm{DQE}(f) = \\frac{\\mathrm{MTF}^2(f)}{\\bar{n} \\cdot \\mathrm{NPS}(f)}
+
+    where :math:`\\bar{n}` is the mean number of electrons per pixel (signal
+    level) and :math:`\\mathrm{NPS}(f)` is the normalised noise power spectrum:
+
+    .. math::
+
+        \\mathrm{NPS}(f) = \\frac{1}{N_{\\mathrm{img}}\\, N_x N_y\\, \\bar{n}^2}
+        \\sum_k \\left| \\mathcal{F}\\!\\left[ I_k - \\bar{I} \\right](f) \\right|^2
+
+    The dark-field mean is subtracted from each flat-field image before
+    computing the NPS, so that the detector read-noise is excluded from
+    :math:`\\bar{n}` but its contribution to the NPS is correctly accounted for.
+
+    Parameters
+    ----------
+    flat_paths : list of str
+        Paths to the flat-field (uniform illumination) images.  At least 5
+        images are recommended for a stable NPS estimate; 20–50 are ideal.
+    dark_paths : list of str
+        Paths to the dark-field (shutter closed) images.  Used to estimate
+        and subtract the detector dark offset.
+    mtf_file : str
+        Path to the MTF file (columns: frequency in cyc/px, MTF value), as
+        produced by :func:`compute_mtf_slanted_edge`.
+    gain_reference : ndarray or None, optional
+        2D gain reference map (same shape as the images).  When provided,
+        each flat-field image is divided by ``gain_reference`` before
+        computing the NPS to correct for pixel-to-pixel sensitivity
+        variations.  ``None`` skips gain correction. Default is ``None``.
+    n_freq : int, optional
+        Number of radial frequency bins for the azimuthal average.
+        Default is 128.
+    plot : bool, optional
+        If ``True``, display MTF², NPS, and DQE curves. Default is ``False``.
+    save : str or None, optional
+        If a file path is given, save the result as a two-column text file
+        (frequency in cyc/px, DQE value) readable by
+        :func:`deconvolve_mtf_2d_rl`. Default is ``None``.
+
+    Returns
+    -------
+    freq_bins : ndarray, shape (n_freq,)
+        Radial frequency axis in cycles/pixel (0 to 0.5).
+    dqe : ndarray, shape (n_freq,)
+        Radially-averaged DQE, values in [0, 1].
+
+    Notes
+    -----
+    * All images must have the same shape.
+    * Images are expected to be in raw detector counts (electrons or ADU).
+    * At very low dose the DQE drops because read noise dominates; at very
+      high dose it drops due to detector non-linearity.  Run this function
+      at several dose levels to characterise the dose dependence.
+    """
+    # ------------------------------------------------------------------
+    # 1. Load dark images → mean dark frame
+    # ------------------------------------------------------------------
+    dark_stack = np.array([load_data(p)[1].astype(float) for p in dark_paths])
+    dark_mean  = dark_stack.mean(axis=0)
+
+    # ------------------------------------------------------------------
+    # 2. Load flat images, subtract dark, optional gain correction
+    # ------------------------------------------------------------------
+    flat_list = []
+    for p in flat_paths:
+        img = load_data(p)[1].astype(float) - dark_mean
+        if gain_reference is not None:
+            img = img / np.where(gain_reference > 0, gain_reference, 1.0)
+        flat_list.append(img)
+
+    flat_stack = np.array(flat_list)          # shape (N, ny, nx)
+    n_img, ny, nx = flat_stack.shape
+
+    # Mean signal level (electrons/pixel) over all frames and pixels
+    n_bar = float(np.mean(flat_stack))
+    if n_bar <= 0:
+        raise ValueError("Mean flat signal is non-positive after dark subtraction. "
+                         "Check dark and flat images.")
+
+    # ------------------------------------------------------------------
+    # 3. Compute NPS
+    #    NPS(f) = 1/(N * nx * ny * n_bar²) * Σ_k |FFT(I_k - n_bar)|²
+    # ------------------------------------------------------------------
+    nps_sum = np.zeros((ny, nx), dtype=float)
+    for img in flat_stack:
+        diff     = img - n_bar
+        fft_diff = np.fft.fft2(diff)
+        nps_sum += np.abs(fft_diff) ** 2
+
+    nps_2d = nps_sum / (n_img * nx * ny * n_bar ** 2)
+
+    # ------------------------------------------------------------------
+    # 4. Load MTF, build 2D MTF map, compute MTF²
+    # ------------------------------------------------------------------
+    mtf_data = np.loadtxt(mtf_file, comments='#')
+    freq_1d  = mtf_data[:, 0]
+    mtf_1d   = mtf_data[:, 1]
+    if freq_1d[0] > 0:
+        freq_1d = np.concatenate([[0.0], freq_1d])
+        mtf_1d  = np.concatenate([[1.0], mtf_1d])
+
+    fy = np.fft.fftfreq(ny)
+    fx = np.fft.fftfreq(nx)
+    FX, FY = np.meshgrid(fx, fy)
+    freq_radial = np.sqrt(FX**2 + FY**2)
+    mtf_2d  = np.interp(freq_radial, freq_1d, mtf_1d, left=1.0, right=0.0)
+    mtf2_2d = mtf_2d ** 2
+
+    # ------------------------------------------------------------------
+    # 5. DQE 2D = MTF² / (n_bar * NPS)
+    # ------------------------------------------------------------------
+    dqe_2d = mtf2_2d / (n_bar * np.where(nps_2d > 0, nps_2d, np.inf))
+    dqe_2d = np.clip(dqe_2d, 0.0, 1.0)
+
+    # ------------------------------------------------------------------
+    # 6. Radial (azimuthal) average
+    # ------------------------------------------------------------------
+    freq_bins  = np.linspace(0, 0.5, n_freq + 1)
+    freq_centers = 0.5 * (freq_bins[:-1] + freq_bins[1:])
+
+    # Use fftshift so that freq_radial maps cleanly to positive half-axis
+    freq_flat  = np.fft.fftshift(freq_radial).ravel()
+    dqe_flat   = np.fft.fftshift(dqe_2d).ravel()
+    nps_flat   = np.fft.fftshift(nps_2d).ravel()
+    mtf2_flat  = np.fft.fftshift(mtf2_2d).ravel()
+
+    dqe_radial  = np.zeros(n_freq)
+    nps_radial  = np.zeros(n_freq)
+    mtf2_radial = np.zeros(n_freq)
+
+    for i, (f_lo, f_hi) in enumerate(zip(freq_bins[:-1], freq_bins[1:])):
+        mask = (freq_flat >= f_lo) & (freq_flat < f_hi)
+        if mask.any():
+            dqe_radial[i]  = dqe_flat[mask].mean()
+            nps_radial[i]  = nps_flat[mask].mean()
+            mtf2_radial[i] = mtf2_flat[mask].mean()
+
+    # ------------------------------------------------------------------
+    # 7. Optional save
+    # ------------------------------------------------------------------
+    if save is not None:
+        header = (f"# DQE computed from {n_img} flat / {len(dark_paths)} dark images\n"
+                  f"# Mean signal level: {n_bar:.2f} counts/pixel\n"
+                  f"# Columns: frequency (cyc/px)   DQE")
+        np.savetxt(save,
+                   np.column_stack([freq_centers, dqe_radial]),
+                   header=header, fmt='%.6f')
+
+    # ------------------------------------------------------------------
+    # 8. Optional plot
+    # ------------------------------------------------------------------
+    if plot:
+        fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+
+        axes[0].plot(freq_centers, mtf2_radial, 'b-', lw=2)
+        axes[0].set_title('MTF²')
+        axes[0].set_xlabel('Frequency (cyc/px)')
+        axes[0].set_ylabel('MTF²')
+        axes[0].axvline(0.5, color='gray', ls=':', alpha=0.5, label='Nyquist')
+        axes[0].set_ylim(0, 1.05)
+        axes[0].grid(True, alpha=0.3)
+        axes[0].legend()
+
+        axes[1].plot(freq_centers, nps_radial, 'r-', lw=2)
+        axes[1].set_title(f'NPS  (n̄ = {n_bar:.1f} counts/px)')
+        axes[1].set_xlabel('Frequency (cyc/px)')
+        axes[1].set_ylabel('NPS (normalised)')
+        axes[1].grid(True, alpha=0.3)
+
+        axes[2].plot(freq_centers, dqe_radial, 'g-', lw=2)
+        axes[2].set_title('DQE')
+        axes[2].set_xlabel('Frequency (cyc/px)')
+        axes[2].set_ylabel('DQE')
+        axes[2].set_ylim(0, 1.05)
+        axes[2].axvline(0.5, color='gray', ls=':', alpha=0.5, label='Nyquist')
+        axes[2].grid(True, alpha=0.3)
+        axes[2].legend()
+
+        plt.suptitle(f'DQE measurement  —  {n_img} flat images', y=1.01)
+        plt.tight_layout()
+        plt.show()
+
+    return freq_centers, dqe_radial
 
 
 

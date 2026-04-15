@@ -1,5 +1,5 @@
 from .filereader import load_data
-from .recalibration import recalibrate_with_beamstop, recalibrate_with_beamstop_noponi
+from .recalibration import recalibrate_from_isocurve
 from .pdf_extraction import compute_ePDF
 from pyFAI import load
 import fabio
@@ -7,6 +7,16 @@ from matplotlib import pyplot as plt
 from matplotlib.colors import LogNorm
 import numpy as np
 import hyperspy.api as hs
+
+def _mask_as_array(mask):
+    """Return a boolean ndarray from a mask that may be a file path or already an ndarray."""
+    if mask is None:
+        return None
+    if isinstance(mask, np.ndarray):
+        return mask.astype(bool)
+    
+    return fabio.open(mask).data.astype(bool)
+
 
 
 class SAEDProcessor:
@@ -16,16 +26,14 @@ class SAEDProcessor:
                 mask=None,
                 # deconvolution parameters
                 mtf_file=None,
-                filter = 'rl', # or 'wiener',
-                n_iterations=50, # for rl deconvolution
                 wiener_epsilon=None,
                 verbose=False):
         """
         Initialise a SAED data processor.
 
         Loads the image, identifies the camera type and wavelength from
-        metadata, optionally applies MTF deconvolution, and prepares the
-        pyFAI azimuthal integrator if a PONI file is provided.
+        metadata, optionally applies MTF deconvolution (Wiener filter), and
+        prepares the pyFAI azimuthal integrator if a PONI file is provided.
 
         Parameters
         ----------
@@ -38,67 +46,84 @@ class SAEDProcessor:
             Path to a fabio mask file (EDF or similar). Convention:
             0 = valid pixel, 1 = masked pixel.
         mtf_file : str, optional
-            Path to the MTF file used for detector deconvolution.
+            Path to the MTF file used for Wiener deconvolution.
             If ``None``, no deconvolution is applied.
-        filter : {'rl', 'wiener'}, optional
-            Deconvolution algorithm. ``'rl'`` (default) uses
-            Richardson-Lucy; ``'wiener'`` uses the Wiener filter.
-        n_iterations : int, optional
-            Number of Richardson-Lucy iterations. Default is 50.
         wiener_epsilon : float, optional
             Regularisation parameter for the Wiener filter.
-            If ``None``, read from the MTF file.
+            If ``None``, read from column 3 of the MTF file.
         verbose : bool, optional
             If ``True``, print metadata and detector info. Default is ``False``.
         """
         self.dm4_file = image_file
         self.poni_file = poni_file
-        self.initial_center = None  # To be set by user after inspection via plot()
-        metadata, img = load_data(image_file,verbose=verbose)
+        metadata, img = load_data(image_file, verbose=verbose)
         self.metadata = metadata
         self.img = img
+
+        # load mask if provided, otherwise create an empty mask
         if mask is not None:
             mask_img = fabio.open(mask)
             self.mask = mask_img.data
         else:
             self.mask = np.zeros_like(self.img)
-        
+        # load poni file if provided, and prepare pyFAI integrator
         if poni_file is not None:
             self.ai = load(poni_file)
-            self.use_pyfai=True
+            self.use_pyfai = True
             if mask is not None:
                 mask_img = fabio.open(mask)
                 self.mask = mask_img.data.astype(bool)
             else:
                 self.mask = np.zeros(self.img.shape, dtype=bool)
         else:
-            img = hs.load(image_file)
-            self.use_pyfai=False
-            self.scale = img.axes_manager[0].scale# in nm/pixel
-            self.units = img.axes_manager[0].units
+            _hs_img = hs.load(image_file)
+            self.use_pyfai = False
+            self.scale = _hs_img.axes_manager[0].scale
+            self.units = _hs_img.axes_manager[0].units
             print(f'scale = {self.scale}, unit = {self.units}')
+
+        # load and apply MTF deconvolution (Wiener filter) if MTF file is provided
         if mtf_file is not None:
-            self.ismtf = True            
-            from .utilities import deconvolve_mtf_2d, deconvolve_mtf_2d_rl
-            if filter =='wiener':
-                self.img = deconvolve_mtf_2d(self.img, mtf_file, wiener_epsilon=wiener_epsilon)
-            elif filter == 'rl':
-                self.img = deconvolve_mtf_2d_rl(self.img, mtf_file, n_iterations=n_iterations, plot=False)
+            self.ismtf = True
+            from .utilities import deconvolve_mtf_2d
+            self.img = deconvolve_mtf_2d(self.img, mtf_file, wiener_epsilon=wiener_epsilon)
         else:
             self.ismtf = False
-        # flag to skip recalibration if already done once, to speed up parameter adjustments in interactive mode 
-        self.skip_center_recalibration = False 
+
+        # check binning
+        if self.metadata['image_height'] != self.img.shape[0] or self.metadata['image_width'] != self.img.shape[1]:
+            self.binning = self.metadata['image_height'] / self.img.shape[0]
+        else:
+            self.binning = 1
+
+        # Determine beam centre automatically via iso-intensity contour method.
+        # Fall back to the intensity-maximum if isocurve detection fails.
+        try:
+            cx, cy = recalibrate_from_isocurve(
+                self.img, mask=_mask_as_array(self.mask), plot=False
+            )
+            print(f'Centre estimate from iso-intensity contours: (x={cx:.2f}, y={cy:.2f})')
+        except Exception as _e:
+            _yx = np.unravel_index(np.argmax(self.img), self.img.shape)
+            cy, cx = float(_yx[0]), float(_yx[1])
+            print(
+                f'Warning: iso-intensity centre detection failed ({_e}). '
+                f'Falling back to intensity maximum: (x={cx:.1f}, y={cy:.1f}). '
+                'Refine manually in the app.'
+            )
+        self.center = (cx, cy)
 
             
 
 
-    def integrate(self, dm4_file=None, npt=2500, initial_center=None, plot=False):
+    def integrate(self, dm4_file=None, npt=2500, center=None, plot=False):
         """
         Azimuthally integrate the SAED pattern to a 1D I(q) profile.
 
-        If a PONI file was provided at initialisation, pyFAI is used after
-        iterative beam-centre recalibration. Otherwise, a simple radial
-        binning is applied using the pixel scale from the image metadata.
+        Beam centre recalibration is always performed with
+        :func:`recalibrate_from_isocurve` using ``self.center`` as the
+        initial estimate.  If *center* is provided it overwrites
+        ``self.center`` and is used directly without re-running isocurve.
 
         Parameters
         ----------
@@ -107,9 +132,10 @@ class SAEDProcessor:
             uses ``self.dm4_file``.
         npt : int, optional
             Number of points in the output q profile. Default is 2500.
-        initial_center : tuple of float, optional
-            Initial beam centre ``(x, y)`` in pixels. Falls back to
-            ``self.initial_center`` if ``None``.
+        center : tuple of float, optional
+            Beam centre ``(x, y)`` in pixels.  If provided, overwrites
+            ``self.center`` before integrating.  If ``None``, uses
+            ``self.center`` as computed at initialisation.
         plot : bool, optional
             If ``True``, display the integrated I(q) pattern. Default is ``False``.
 
@@ -120,50 +146,40 @@ class SAEDProcessor:
         I : ndarray
             Azimuthally averaged intensity.
         """
-        
-        
-        
-        # Use provided initial_center, or fall back to self.initial_center
-        center = initial_center if initial_center is not None else self.initial_center
-        
-        if self.use_pyfai:
-            
-            # perform MTF correction if MTF data is available  
-            if not self.skip_center_recalibration:          
-                self.ai = recalibrate_with_beamstop(self.dm4_file, self.poni_file, initial_center=center,mask=self.mask) # seek beamcentre
-            else:
-                pass
-            # integrate using pyFAI with the calibrated ai and mask (self.img is mtf deconvoluted in initialization if mtf_file is provided)
-            q, I = self.ai.integrate1d(self.img, npt, mask = self.mask, unit="q_A^-1", polarization_factor=0.99)
-            
-            
+        if center is not None:
+            # User-supplied centre: store and use directly
+            self.center = center
+        cx, cy = float(self.center[0]), float(self.center[1])
 
-        else: # intégration personnalisée sans pyFAI, pour les cas où il n'y a pas de fichier de calibration ou que les images ont des résolutions différentes
-                                                        
-            # Recalibrer le centre
-            if not self.skip_center_recalibration:
-                center_x, center_y = recalibrate_with_beamstop_noponi(self.img, threshold_rel=0.5, min_size=50, initial_center=center, plot=False)
-            else:
-                center_x = self.initial_center[0]; center_y = self.initial_center[1]
-            # Calculer le profil radial
-            y, x = np.indices(self.img.shape)
-            r = np.sqrt((x - center_x)**2 + (y - center_y)**2)
-            
-            # Arrondir les distances pour créer des bins
-            r_int = r.astype(int)
-            
-            # Calculer le profil radial (moyenne azimutale)
-            radial_bins = np.bincount(r_int.ravel(), weights=self.img.ravel())
-            radial_counts = np.bincount(r_int.ravel())
+        if self.use_pyfai:
+            fit2d = self.ai.getFit2D()
+            fit2d['centerX'] = cx
+            fit2d['centerY'] = cy
+            self.ai.setFit2D(**fit2d)
+            q, I = self.ai.integrate1d(
+                self.img, npt, mask=self.mask, unit="q_A^-1", polarization_factor=0.99
+            )
+        else:
+            mask_bool = np.asarray(self.mask, dtype=bool)
+            valid = ~mask_bool.ravel()
+            y_idx, x_idx = np.indices(self.img.shape)
+            r = np.sqrt((x_idx - cx)**2 + (y_idx - cy)**2)
+            r_int = r.astype(int).ravel()
+            img_flat = self.img.ravel()
+            radial_bins = np.bincount(r_int[valid], weights=img_flat[valid],
+                                      minlength=r_int.max() + 1)
+            radial_counts = np.bincount(r_int[valid], minlength=r_int.max() + 1)
             I = radial_bins / radial_counts
-    
-            # Axe q (distances radiales)
-            q = np.arange(len(I))#pixel array
-            
-            q = q * self.scale  # Convertir les distances en unités physiques (ex: nm)
-            q *= 2*np.pi  # Convertir en q (Å^-1) si les distances sont en nm
+            q = np.arange(len(I))
             if self.units == '1/nm':
-                q /= 10  # Convertir en Å^-1 si les distances sont en nm
+                q = q * self.scale * 2 * np.pi / 10
+            elif self.units == 'mrad':
+                theta = q * self.scale * 1e-3
+                q = 4 * np.pi * np.sin(theta) / self.metadata['wavelength']
+                q /= self.binning
+            else:
+                q = q * self.scale * 2 * np.pi
+                
 
         
 
@@ -179,8 +195,9 @@ class SAEDProcessor:
         return q, I
     
     def plot(self,vmin=-4, vmax=0,cmap='jet',display_mask=False):
+        plt.figure()
         if display_mask:
-            plt.figure()
+            
             # Create a copy of the image for display
             img_display = self.img.copy() / np.max(self.img)
             # Set masked pixels to NaN to display them in white
@@ -190,31 +207,33 @@ class SAEDProcessor:
             current_cmap = plt.get_cmap(cmap).copy()
             current_cmap.set_bad(color='white')
             plt.imshow(img_display, cmap=current_cmap, norm=LogNorm(vmin=10**(vmin), vmax=10**(vmax)))
-        else:
-            plt.figure()
+            plt.plot(self.center[0], self.center[1], 'k+', markersize=8)
+        else:            
             plt.imshow(self.img/np.max(self.img), cmap=cmap, norm=LogNorm(vmin=10**(vmin), vmax=10**(vmax)))
-    
-    def plot_recalibrated_image(self, initial_center=None):
-        """
-        Display the diffraction image with the detected beam centre and rings.
+        #plot center as wihte cross
+            plt.plot(self.center[0], self.center[1], 'w+', markersize=8)
 
-        Runs the recalibration with ``plot=True`` to trigger the diagnostic
-        figure, without storing the result.
+    
+    def plot_recalibrated_image(self, **kwargs):
+        """
+        Display the diffraction image with the detected beam centre.
+
+        Runs :func:`recalibrate_from_isocurve` with ``plot=True``
+        to trigger the diagnostic figure, using ``self.center`` as
+        the initial estimate.  The result is not stored.
 
         Parameters
         ----------
-        initial_center : tuple of float, optional
-            Initial beam centre ``(x, y)`` in pixels. Falls back to
-            ``self.initial_center`` if ``None``.
+        **kwargs
+            Extra keyword arguments forwarded to
+            :func:`recalibrate_from_isocurve` (e.g. ``n_levels``,
+            ``level_range``, ``rms_rel_max``, ``min_arc_deg``,
+            ``cluster_window``).
         """
-        center = initial_center if initial_center is not None else self.initial_center
-        
-        if self.use_pyfai:
-            # Note: The mask display is handled inside recalibrate_with_beamstop
-            _ = recalibrate_with_beamstop(self.dm4_file, self.poni_file, initial_center=center, mask=self.mask, plot=True)
-            
-        else:
-            _ = recalibrate_with_beamstop_noponi(self.img, initial_center=center, plot=True)
+        recalibrate_from_isocurve(
+            self.img, mask=_mask_as_array(self.mask), plot=True,
+            initial_center=self.center, **kwargs
+        )
 
     def inspect_histogram(self, bins=256, log_scale=True, exclude_zero=False,
                           saturation_threshold=0.98, percentile_clip=99.9999):
@@ -335,26 +354,25 @@ class SAEDProcessor:
     def extract_epdf(self,
                      ref_diffraction_image=None,
                      ref_poni_file=None,
-                     composition = 'Au',                     
+                     composition='Au',
                      rmin=0.1,
                      rmax=50.0,
                      rstep=0.01,
                      outputfile=None,
-                     interactive = True,
-                     plot = False,
+                     interactive=True,
+                     plot=False,
                      mtf_file=None,
                      bgscale=1,
                      qmin=1.5,
                      qmax=24,
                      qmaxinst=24,
-                     rpoly=1.4,
-                     initial_center=None,
-                     initial_center_ref=None):
+                     rpoly=1.4):
         """
         Extract the ePDF from the SAED data (convenience wrapper).
 
-        Creates a temporary :class:`SAEDProcessor` for the reference if
-        provided, then delegates to the standalone :func:`extract_epdf`
+        Creates a :class:`SAEDProcessor` for the reference image if provided
+        (which automatically computes its own beam centre via isocurve at
+        initialisation), then delegates to the standalone :func:`extract_epdf`
         function.
 
         Parameters
@@ -383,10 +401,6 @@ class SAEDProcessor:
             Q-range limits in Å⁻¹ for PDF computation.
         rpoly : float, optional
             Polynomial background degree control (PDFgetX3 convention).
-        initial_center : tuple of float, optional
-            Override ``self.initial_center`` for this call.
-        initial_center_ref : tuple of float, optional
-            Initial beam centre for the reference image.
 
         Returns
         -------
@@ -395,187 +409,30 @@ class SAEDProcessor:
             ``r, g = results`` unpacking.
             Non-interactive mode: ``(r, G)`` tuple of ndarrays.
         """
-        # Create reference processor if provided
         ref_processor = None
         if ref_diffraction_image is not None:
             ref_processor = SAEDProcessor(
                 ref_diffraction_image,
                 poni_file=ref_poni_file if ref_poni_file is not None else self.poni_file,
-                verbose=False
+                verbose=False,
             )
-            # Set initial center for reference
-            if initial_center_ref is not None:
-                ref_processor.initial_center = initial_center_ref
-            elif initial_center is not None:
-                ref_processor.initial_center = initial_center
-        
-        # Temporarily override initial_center if provided
-        original_center = self.initial_center
-        if initial_center is not None:
-            self.initial_center = initial_center
-        
-        try:
-            # Call standalone function
-            return extract_epdf(
-                sample_processor=self,
-                ref_processor=ref_processor,
-                composition=composition,
-                rmin=rmin,
-                rmax=rmax,
-                rstep=rstep,
-                outputfile=outputfile,
-                interactive=interactive,
-                plot=plot,
-                bgscale=bgscale,
-                qmin=qmin,
-                qmax=qmax,
-                qmaxinst=qmaxinst,
-                rpoly=rpoly
-            )
-        finally:
-            # Restore original center
-            self.initial_center = original_center
-        # retrive wavelength from metadata
-        wavelength = self.metadata['wavelength']
-        camera = self.metadata['camera_title']
-        sample_diffraction_image = self.dm4_file
 
-        # add attributes to class for further use in PDFinteractive
-        self.ref_diffraction_image = ref_diffraction_image
-        self.composition = composition
-        # load sample and reference images
-        info , sample_data = load_data(sample_diffraction_image, verbose=False)
-        if ref_diffraction_image:
-            _, ref_data = load_data(ref_diffraction_image, verbose=False)
-        else:
-            ref_data = None    
-        
-
-        # Recalibrate centre
-        if self.use_pyfai:
-            # Use the already calibrated AzimuthalIntegrator from self.ai if available,
-            # otherwise recalibrate
-            if hasattr(self, 'ai') and self.ai is not None:
-                ai = self.ai
-            else:
-                # Initialize Azimuthal Integrator from poni file and recalibrate
-                
-                ai = recalibrate_with_beamstop(
-                dm4file=sample_diffraction_image,
-                ponifile=self.poni_file,
-                threshold_rel=0.5,
-                min_size=80,
-                initial_center=initial_center,
-                plot=False
-                )
-                # Store the calibrated ai for future use
-                self.ai = ai
-            
-            # Integrate sample image
-            q_sample, intensity_sample = ai.integrate1d(
-                sample_data,
-                npt=2500,
-                unit="q_A^-1")
-            
-            # Integrate reference image
-            if ref_data is not None:
-                # If ref_poni_file is provided or images have different resolutions
-                if ref_poni_file is not None or ref_data.shape != sample_data.shape:
-                    # Recalibrate separately for reference
-                    poni_for_ref = ref_poni_file if ref_poni_file is not None else self.poni_file
-                    
-                    ai_ref = recalibrate_with_beamstop(
-                        dm4file=ref_diffraction_image,
-                        ponifile=poni_for_ref,
-                        threshold_rel=0.5,
-                        min_size=80,
-                        initial_center=initial_center_ref if initial_center_ref is not None else initial_center,
-                        plot=False
-                    )
-                else:
-                    # Use same ai if resolutions match
-                    ai_ref = ai
-                
-                q_ref, intensity_ref = ai_ref.integrate1d(
-                    ref_data,
-                    npt=2500,
-                    unit="q_A^-1")
-        else:# no poni file, use custom integration
-            q_sample, intensity_sample = self.integrate(self.dm4_file, initial_center=initial_center, plot=False)
-            q_ref, intensity_ref = self.integrate(dm4_file= ref_diffraction_image, initial_center=initial_center_ref if initial_center_ref is not None else initial_center, plot=False) if ref_data is not None else (None, None)
-        
-        if outputfile is None:
-            # repalce None by default name based on sample image name
-            outputfile = sample_diffraction_image.split('.')[0] + '_pdf.gr'
-
-        if interactive:
-            # Create PDFInteractive object
-            pdf_interactive = PDFInteractive(
-                q_sample,
-                intensity_sample,
-                composition=composition,
-                rmin=rmin,
-                rmax=rmax,
-                rstep=rstep,
-                ref_diffraction_image=ref_diffraction_image if ref_diffraction_image is not None else None,
-                outputfile=outputfile,
-                SAEDProcessor=self,
-                initial_center=initial_center,
-                initial_center_ref=initial_center_ref,
-                xray=False
-            )
-            # Si une méthode d'export existe, l'appeler ici
-            if hasattr(pdf_interactive, 'save_results'):
-                pdf_interactive.save_results(outputfile)
-            pdf_interactive.show()
-            # Store the interactive object for access to results
-            self.pdf_interactive = pdf_interactive
-            # Return a reference to the results that will be updated by sliders
-            return PDFResultsReference(pdf_interactive)
-        else:
-            print('Compute PDF with given parameters')
-            r,G = compute_ePDF(
-                q_sample,
-                intensity_sample,
-                composition,
-                Iref=intensity_ref if ref_data is not None else None,
-                bgscale=bgscale,
-                qmin=qmin,
-                qmax=qmax,
-                qmaxinst=qmaxinst,
-                rmin=rmin,
-                rmax=rmax,
-                rstep=rstep,
-                rpoly=rpoly,
-                Lorch=True,
-                plot=plot)
-            # header should have same architecture as .gr files from pdfgetx3 for compatibility with PDFBatchAnalysis
-            header  = '[DEFAULT]\n\nversion = ePDFsuite 1.0\n\n'
-            header += '#input and output specifications\n'
-            header += 'dataformat = q_A \n'
-            header +=f'inputfile = {sample_diffraction_image}\n'
-            header +=f'backgroundfile = {ref_diffraction_image}\n'
-            header += 'outputtype = gr\n\n'
-            header += '#PDF calculation setup\n'
-            header += 'mode = electrons\n'        
-            header +=f'wavelength = {self.metadata.get("wavelength", "unknown"):.4f}\n'
-            header += 'twothetazero = 0\n'        
-            header +=f'composition={composition} \n'
-            header +=f'bgscale = {1:.2f} \n'
-            header +=f'rpoly = {1.4} \n'
-            header +=f'qmaxinst = {np.max(q_sample):.2f}\n'
-            header +=f'qmin = {np.min(q_sample):.2f} \n'
-            header +=f'qmax = {np.max(q_sample):.2f}  \n'
-            header +=f'rmin = {0:.2f} \n'
-            header +=f'rmax = {50:.2f} \n'
-            header +=f'rstep = {0.01:.2f}\n\n'
-            header += '# End of config --------------------------------------------------------------\n#### start data\n\n'
-            header += '#S 1 \n'
-            header += '#L r(Å)  G(Å$^{-2}$)'
-
-            np.savetxt(outputfile, np.column_stack((r, G)),header=header,delimiter=' ',comments='')
-            print(f'PDF saved to {outputfile}')
-            return r, G
+        return extract_epdf(
+            sample_processor=self,
+            ref_processor=ref_processor,
+            composition=composition,
+            rmin=rmin,
+            rmax=rmax,
+            rstep=rstep,
+            outputfile=outputfile,
+            interactive=interactive,
+            plot=plot,
+            bgscale=bgscale,
+            qmin=qmin,
+            qmax=qmax,
+            qmaxinst=qmaxinst,
+            rpoly=rpoly,
+        )
 
 
 

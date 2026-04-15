@@ -14,7 +14,6 @@ from plotly.subplots import make_subplots
 
 # Import the necessary modules from your package
 from epdfsuite import SAEDProcessor, extract_epdf
-from epdfsuite.recalibration import recalibrate_with_beamstop_noponi
 from epdfsuite.filereader import load_data
 from epdfsuite.utilities import draw_mask
 from epdfsuite.pdf_extraction import compute_ePDF
@@ -25,6 +24,7 @@ if 'sample_processor' not in st.session_state:
     st.session_state.sample_processor = None
 if 'ref_processor' not in st.session_state:
     st.session_state.ref_processor = None
+
 
 # Configure Streamlit page
 st.set_page_config(
@@ -81,37 +81,38 @@ tab1, tab2 = st.tabs(["📸 Define Sample and Reference", "📈 Extract ePDF"])
 # ============================================================================
 with tab1:
     st.markdown("# 📸 Define Sample and Reference")
-    st.markdown("**Upload your diffraction images, inspect them, and define beam centers.**")
-    
-    # Create two columns for Sample and Reference
+    st.markdown(
+        "**Step 1:** upload your files. "
+        "**Step 2:** click *Create SAEDProcessor* to auto-detect the beam centre. "
+        "**Step 3:** refine the centre manually if needed and click *Update*."
+    )
+
     col_sample, col_ref = st.columns(2)
-    
+
     # ========== SAMPLE COLUMN ==========
     with col_sample:
         st.markdown("### 🔵 Sample")
-        
-        st.markdown("**Sample Image**")
+
+        # --- 1. Upload files ---
+        st.markdown("#### 1️⃣ Upload Files")
+
         sample_image = st.file_uploader(
-            "Upload sample diffraction image",
+            "Diffraction image",
             type=["dm4", "dm3", "tif", "tiff"],
             key="sample_image",
-            label_visibility="collapsed"
         )
-        
-        st.markdown("**PONI File**")
         sample_poni = st.file_uploader(
-            "Upload sample PONI file (optional)",
+            "PONI file (optional)",
             type=["poni"],
             key="sample_poni",
-            label_visibility="collapsed"
         )
-        
-        _col_mask, _col_btn = st.columns([3, 2])
-        with _col_mask:
-            st.markdown("**Mask File**")
-        with _col_btn:
-            if st.button("🎨 Click here to draw mask",
-                         disabled=(sample_image is None),
+
+        _col_mlbl, _col_mbtn = st.columns([3, 2])
+        with _col_mlbl:
+            st.caption("Mask file (.edf, optional)")
+        with _col_mbtn:
+            if st.button("🎨 Draw mask", disabled=(sample_image is None),
+                         key="sample_draw_mask",
                          help="Opens the pyFAI-drawmask GUI on the sample image"):
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".dm4") as _tmp:
                     _tmp.write(sample_image.getbuffer())
@@ -122,278 +123,331 @@ with tab1:
                     if os.path.exists(_tmp_path):
                         os.remove(_tmp_path)
         sample_mask = st.file_uploader(
-            "Upload sample mask file (*.edf, optional)",
+            "Mask file (.edf, optional)",
             type=["edf"],
             key="sample_mask",
-            label_visibility="collapsed"
+            label_visibility="collapsed",
         )
-        
-        st.markdown("**MTF File**")
         sample_mtf = st.file_uploader(
-            "Upload sample MTF file (optional)",
+            "MTF file (optional)",
             key="sample_mtf",
-            label_visibility="collapsed"
         )
-        
-        if sample_image is not None:
-            # Save to temp file and load
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".dm4") as tmp_file:
-                tmp_file.write(sample_image.getbuffer())
-                sample_tmp_path = tmp_file.name
-            
-            try:
-                metadata_sample, img_sample = load_data(sample_tmp_path, verbose=False)
-                
-                # Display image with Plotly (interactive coordinates)
-                img_normalized = np.log10(img_sample / np.max(img_sample) + 1e-4)
-                fig_sample = go.Figure(data=go.Heatmap(
-                    z=img_normalized,
-                    colorscale='Jet',
-                    hovertemplate='X: %{x}<br>Y: %{y}<br>Intensity: %{z:.2f}<extra></extra>',
-                    showscale=False,
-                ))
-                fig_sample.update_layout(
-                    title="Sample Image (hover to see coordinates)",
-                    xaxis_title="X (pixels)",
-                    yaxis_title="Y (pixels)",
-                    height=500,
-                    yaxis=dict(autorange='reversed', scaleanchor="x", scaleratio=1),  # Square aspect ratio
-                    xaxis=dict(constrain='domain'),
-                )
-                st.plotly_chart(fig_sample, use_container_width=True)
-                
-                # Center input
-                st.markdown("**Beam Center Coordinates**")
-                _max_yx_sample = np.unravel_index(np.argmax(img_sample), img_sample.shape)
-                col_cx, col_cy = st.columns(2)
-                with col_cx:
-                    sample_center_x = st.number_input("Center X", value=int(_max_yx_sample[1]), step=1, key="sample_cx")
-                with col_cy:
-                    sample_center_y = st.number_input("Center Y", value=int(_max_yx_sample[0]), step=1, key="sample_cy")
-                
-                # Store paths in session state
-                st.session_state.sample_tmp_path = sample_tmp_path
-                st.session_state.sample_center = (sample_center_x, sample_center_y)
-                st.session_state.img_sample = img_sample
-                
-                # Handle PONI file
-                if sample_poni is not None:
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".poni") as tmp_poni:
-                        tmp_poni.write(sample_poni.getbuffer())
-                        st.session_state.sample_poni_path = tmp_poni.name
-                else:
-                    st.session_state.sample_poni_path = None
-                
-                # Handle Mask file
-                if sample_mask is not None:
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".edf") as tmp_mask:
-                        tmp_mask.write(sample_mask.getbuffer())
-                        st.session_state.sample_mask_path = tmp_mask.name
-                else:
-                    st.session_state.sample_mask_path = None
-                
-                # Handle MTF file
-                if sample_mtf is not None:
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as tmp_mtf:
-                        tmp_mtf.write(sample_mtf.getbuffer())
-                        st.session_state.sample_mtf_path = tmp_mtf.name
-                else:
-                    st.session_state.sample_mtf_path = None
-                
-            except Exception as e:
-                st.error(f"Error loading sample image: {e}")
+
+        # MTF deconvolution parameters
+        if sample_mtf is not None:
+            # When the file changes, read epsilon from column 3 of the MTF file
+            if st.session_state.get("_sample_mtf_name") != sample_mtf.name:
+                st.session_state["_sample_mtf_name"] = sample_mtf.name
+                try:
+                    import io as _io
+                    _mtf_arr = np.loadtxt(_io.BytesIO(sample_mtf.getbuffer()), comments='#')
+                    st.session_state["sample_mtf_eps"] = float(max(_mtf_arr[0, 2], 1e-10))
+                except Exception:
+                    st.session_state.setdefault("sample_mtf_eps", 1e-2)
+
+            with st.expander("🔧 MTF Deconvolution Parameters", expanded=False):
+                _s_mtf_eps = st.number_input("Wiener ε", format="%.2e",
+                                              min_value=1e-10, key="sample_mtf_eps")
         else:
-            st.info("📤 Upload a sample image")
-    
+            _s_mtf_eps = st.session_state.get("sample_mtf_eps", None)
+
+        # Save temp paths to session_state on every rerun
+        if sample_image is not None:
+            _suffix = "." + sample_image.name.rsplit(".", 1)[-1]
+            with tempfile.NamedTemporaryFile(delete=False, suffix=_suffix) as _f:
+                _f.write(sample_image.getbuffer())
+                st.session_state.sample_tmp_path = _f.name
+            # Invalidate processor when image file changes
+            if st.session_state.get("_sample_image_name") != sample_image.name:
+                st.session_state["_sample_image_name"] = sample_image.name
+                st.session_state.sample_processor = None
+                st.session_state.pop("sample_cx", None)
+                st.session_state.pop("sample_cy", None)
+        else:
+            st.session_state.sample_tmp_path = None
+
+        if sample_poni is not None:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".poni") as _f:
+                _f.write(sample_poni.getbuffer())
+                st.session_state.sample_poni_path = _f.name
+        else:
+            st.session_state.sample_poni_path = None
+
+        if sample_mask is not None:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".edf") as _f:
+                _f.write(sample_mask.getbuffer())
+                st.session_state.sample_mask_path = _f.name
+        else:
+            st.session_state.sample_mask_path = None
+
+        if sample_mtf is not None:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as _f:
+                _f.write(sample_mtf.getbuffer())
+                st.session_state.sample_mtf_path = _f.name
+        else:
+            st.session_state.sample_mtf_path = None
+
+        # --- 2. Create SAEDProcessor ---
+        st.markdown("#### 2️⃣ Create Processor & Detect Centre")
+
+        if st.button("🚀 Create SAEDProcessor", disabled=(sample_image is None),
+                     key="sample_create", type="primary"):
+            with st.spinner("Creating processor and detecting beam centre via isocurve…"):
+                try:
+                    _proc = SAEDProcessor(
+                        st.session_state.sample_tmp_path,
+                        poni_file=st.session_state.sample_poni_path,
+                        mask=st.session_state.sample_mask_path,
+                        mtf_file=st.session_state.sample_mtf_path,
+                        wiener_epsilon=_s_mtf_eps,
+                        verbose=False,
+                    )
+                    st.session_state.sample_processor = _proc
+                    st.session_state.sample_cx = int(round(_proc.center[0]))
+                    st.session_state.sample_cy = int(round(_proc.center[1]))
+                    st.rerun()
+                except Exception as _e:
+                    st.error(f"❌ {_e}")
+                    import traceback
+                    st.error(traceback.format_exc())
+
+        # --- 3. Image + editable centre ---
+        if st.session_state.get("sample_processor") is not None:
+            _proc = st.session_state.sample_processor
+            _cx = st.session_state.get("sample_cx", int(round(_proc.center[0])))
+            _cy = st.session_state.get("sample_cy", int(round(_proc.center[1])))
+
+            st.success(
+                f"✅ Processor ready — auto-detected centre: "
+                f"({int(round(_proc.center[0]))}, {int(round(_proc.center[1]))})"
+            )
+
+            _img_norm = np.log10(_proc.img / np.max(_proc.img) + 1e-4)
+            _fig_s = go.Figure(data=go.Heatmap(
+                z=_img_norm, colorscale="Jet",
+                hovertemplate="X: %{x}<br>Y: %{y}<extra></extra>",
+                showscale=False,
+            ))
+            _fig_s.add_trace(go.Scatter(
+                x=[_cx], y=[_cy], mode="markers",
+                marker=dict(symbol="cross", size=14, color="white",
+                            line=dict(color="white", width=2)),
+                showlegend=False,
+                hovertemplate=f"Centre: ({_cx}, {_cy})<extra></extra>",
+            ))
+            _fig_s.update_layout(
+                title="Sample image — crosshair = current beam centre",
+                xaxis_title="X (pixels)", yaxis_title="Y (pixels)",
+                height=480,
+                yaxis=dict(autorange="reversed", scaleanchor="x", scaleratio=1),
+                xaxis=dict(constrain="domain"),
+                margin=dict(t=50, b=40, l=50, r=10),
+            )
+            st.plotly_chart(_fig_s, use_container_width=True)
+
+            st.markdown("**Beam Centre — edit if needed, then click Update**")
+            _col_sx, _col_sy, _col_supd = st.columns([2, 2, 2])
+            with _col_sx:
+                st.number_input("Center X", step=1, key="sample_cx")
+            with _col_sy:
+                st.number_input("Center Y", step=1, key="sample_cy")
+            with _col_supd:
+                st.markdown("<br>", unsafe_allow_html=True)
+                if st.button("🔄 Update", key="sample_update_center"):
+                    _proc.center = (int(st.session_state.sample_cx),
+                                    int(st.session_state.sample_cy))
+                    st.success(
+                        f"✅ Centre updated to ({_proc.center[0]}, {_proc.center[1]})"
+                    )
+
+        elif sample_image is None:
+            st.info("📤 Upload a diffraction image above.")
+        else:
+            st.info("👆 Click **Create SAEDProcessor** to detect the beam centre.")
+
     # ========== REFERENCE COLUMN ==========
     with col_ref:
         st.markdown("### 🟠 Reference (optional)")
-        
-        st.markdown("**Reference Image**")
+
+        # --- 1. Upload files ---
+        st.markdown("#### 1️⃣ Upload Files")
+
         ref_image = st.file_uploader(
-            "Upload reference diffraction image",
+            "Diffraction image",
             type=["dm4", "dm3", "tif", "tiff"],
             key="ref_image",
-            label_visibility="collapsed"
         )
-        
-        st.markdown("**PONI File**")
         ref_poni = st.file_uploader(
-            "Upload ref PONI file (optional, defaults to sample PONI)",
+            "PONI file (optional, defaults to sample PONI)",
             type=["poni"],
             key="ref_poni",
-            label_visibility="collapsed"
         )
         if ref_poni is None and sample_poni is not None:
-            st.caption(f"ℹ️ Using sample PONI: {sample_poni.name}")
-        elif ref_poni is not None:
-            st.caption(f"✅ Using: {ref_poni.name}")
-        
-        st.markdown("**Mask File**")
+            st.caption(f"ℹ️ Will use sample PONI: {sample_poni.name}")
+
+        _col_rmlbl, _col_rmbtn = st.columns([3, 2])
+        with _col_rmlbl:
+            st.caption("Mask file (.edf, optional, defaults to sample mask)")
+        with _col_rmbtn:
+            if st.button("🎨 Draw mask", disabled=(ref_image is None),
+                         key="ref_draw_mask",
+                         help="Opens the pyFAI-drawmask GUI on the reference image"):
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".dm4") as _tmp:
+                    _tmp.write(ref_image.getbuffer())
+                    _tmp_path = _tmp.name
+                try:
+                    draw_mask(_tmp_path)
+                finally:
+                    if os.path.exists(_tmp_path):
+                        os.remove(_tmp_path)
         ref_mask = st.file_uploader(
-            "Upload ref mask file (*.edf, optional)",
+            "Mask file (.edf, optional)",
             type=["edf"],
             key="ref_mask",
-            label_visibility="collapsed"
+            label_visibility="collapsed",
         )
         if ref_mask is None and sample_mask is not None:
-            st.caption(f"ℹ️ Using sample mask: {sample_mask.name}")
-        elif ref_mask is not None:
-            st.caption(f"✅ Using: {ref_mask.name}")
-        
-        st.markdown("**MTF File**")
+            st.caption(f"ℹ️ Will use sample mask: {sample_mask.name}")
+
         ref_mtf = st.file_uploader(
-            "Upload ref MTF file (optional, defaults to sample MTF)",
+            "MTF file (optional, defaults to sample MTF)",
             key="ref_mtf",
-            label_visibility="collapsed"
         )
         if ref_mtf is None and sample_mtf is not None:
-            st.caption(f"ℹ️ Using sample MTF: {sample_mtf.name}")
-        elif ref_mtf is not None:
-            st.caption(f"✅ Using: {ref_mtf.name}")
-        
-        if ref_image is not None:
-            # Save to temp file and load
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".dm4") as tmp_file:
-                tmp_file.write(ref_image.getbuffer())
-                ref_tmp_path = tmp_file.name
-            
-            try:
-                metadata_ref, img_ref = load_data(ref_tmp_path, verbose=False)
-                
-                # Display image with Plotly (interactive coordinates)
-                img_normalized = np.log10(img_ref / np.max(img_ref) + 1e-4)
-                fig_ref = go.Figure(data=go.Heatmap(
-                    z=img_normalized,
-                    colorscale='Jet',
-                    hovertemplate='X: %{x}<br>Y: %{y}<br>Intensity: %{z:.2f}<extra></extra>',
-                    showscale=False,
-                ))
-                fig_ref.update_layout(
-                    title="Reference Image (hover to see coordinates)",
-                    xaxis_title="X (pixels)",
-                    yaxis_title="Y (pixels)",
-                    height=500,
-                    yaxis=dict(autorange='reversed', scaleanchor="x", scaleratio=1),  # Square aspect ratio
-                    xaxis=dict(constrain='domain'),
-                )
-                st.plotly_chart(fig_ref, use_container_width=True)
-                
-                # Center input
-                st.markdown("**Beam Center Coordinates**")
-                _max_yx_ref = np.unravel_index(np.argmax(img_ref), img_ref.shape)
-                col_cx, col_cy = st.columns(2)
-                with col_cx:
-                    ref_center_x = st.number_input("Center X", value=int(_max_yx_ref[1]), step=1, key="ref_cx")
-                with col_cy:
-                    ref_center_y = st.number_input("Center Y", value=int(_max_yx_ref[0]), step=1, key="ref_cy")
-                
-                # Store paths in session state
-                st.session_state.ref_tmp_path = ref_tmp_path
-                st.session_state.ref_center = (ref_center_x, ref_center_y)
-                st.session_state.img_ref = img_ref
-                
-                # Handle PONI file (default to sample PONI if not provided)
-                if ref_poni is not None:
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".poni") as tmp_poni:
-                        tmp_poni.write(ref_poni.getbuffer())
-                        st.session_state.ref_poni_path = tmp_poni.name
-                else:
-                    st.session_state.ref_poni_path = st.session_state.get('sample_poni_path', None)
-                
-                # Handle Mask file (default to sample mask if not provided)
-                if ref_mask is not None:
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".edf") as tmp_mask:
-                        tmp_mask.write(ref_mask.getbuffer())
-                        st.session_state.ref_mask_path = tmp_mask.name
-                else:
-                    st.session_state.ref_mask_path = st.session_state.get('sample_mask_path', None)
-                
-                # Handle MTF file (default to sample MTF if not provided)
-                if ref_mtf is not None:
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as tmp_mtf:
-                        tmp_mtf.write(ref_mtf.getbuffer())
-                        st.session_state.ref_mtf_path = tmp_mtf.name
-                else:
-                    st.session_state.ref_mtf_path = st.session_state.get('sample_mtf_path', None)
-                
-            except Exception as e:
-                st.error(f"Error loading reference image: {e}")
-        else:
-            st.info("📤 Upload a reference image (optional)")
-            st.session_state.ref_tmp_path = None
-    
-    # ========== VALIDATION BUTTON ==========
-    st.markdown("---")
-    
-    # MTF deconvolution parameters (actifs uniquement si un fichier MTF est fourni)
-    _any_mtf = (sample_mtf is not None) or (ref_mtf is not None)
-    if _any_mtf:
-        st.markdown("### 🔧 MTF Deconvolution Parameters")
-        col_mtf1, col_mtf2 = st.columns(2)
-        with col_mtf1:
-            mtf_filter = st.selectbox(
-                "Filter method",
-                options=['rl', 'wiener'],
-                format_func=lambda x: 'Richardson-Lucy (iterative)' if x == 'rl' else 'Wiener (inverse filter)',
-                index=0,
-                help="RL : Richardson-Lucy (iterative method) · Wiener : inverse filter with Wiener regularization (faster but may amplify noise if not careful with epsilon)"
-            )
-        with col_mtf2:
-            if mtf_filter == 'rl':
-                mtf_n_iterations = st.number_input("Iterations (RL)", value=50, min_value=1, step=1)
-                mtf_wiener_epsilon = None
-            else:
-                mtf_wiener_epsilon = st.number_input(
-                    "Wiener epsilon", value=1e-2, format="%.2e", min_value=1e-10,
-                    help="Wiener regularization parameter (epsilon) to prevent noise amplification. Smaller values preserve more high-frequency details but may amplify noise. Adjust based on your data quality."
-                )
-                mtf_n_iterations = 50
-    else:
-        mtf_filter = 'rl'
-        mtf_n_iterations = 50
-        mtf_wiener_epsilon = None
+            st.caption(f"ℹ️ Will use sample MTF: {sample_mtf.name}")
 
-    if st.button("✅ Validate and Create Processors", type="primary"):
-        if sample_image is None:
-            st.error("❌ Please upload a sample image first")
+        # MTF deconvolution parameters
+        if ref_mtf is not None:
+            # When the file changes, read epsilon from column 3 of the MTF file
+            if st.session_state.get("_ref_mtf_name") != ref_mtf.name:
+                st.session_state["_ref_mtf_name"] = ref_mtf.name
+                try:
+                    import io as _io
+                    _mtf_arr = np.loadtxt(_io.BytesIO(ref_mtf.getbuffer()), comments='#')
+                    st.session_state["ref_mtf_eps"] = float(max(_mtf_arr[0, 2], 1e-10))
+                except Exception:
+                    st.session_state.setdefault("ref_mtf_eps",
+                        st.session_state.get("sample_mtf_eps", 1e-2))
+
+            with st.expander("🔧 MTF Deconvolution Parameters", expanded=False):
+                _r_mtf_eps = st.number_input("Wiener ε", format="%.2e",
+                                              min_value=1e-10, key="ref_mtf_eps")
         else:
-            try:
-                # Create sample processor
-                st.session_state.sample_processor = SAEDProcessor(
-                    st.session_state.sample_tmp_path,
-                    poni_file=st.session_state.sample_poni_path,
-                    mask=st.session_state.get('sample_mask_path', None),
-                    mtf_file=st.session_state.get('sample_mtf_path', None),
-                    filter=mtf_filter,
-                    n_iterations=mtf_n_iterations,
-                    wiener_epsilon=mtf_wiener_epsilon,
-                    verbose=False
-                )
-                st.session_state.sample_processor.initial_center = st.session_state.sample_center
-                
-                # Create reference processor if provided
-                if st.session_state.ref_tmp_path is not None:
-                    st.session_state.ref_processor = SAEDProcessor(
+            _r_mtf_eps = st.session_state.get("ref_mtf_eps",
+                                               st.session_state.get("sample_mtf_eps", None))
+
+        # Save temp paths to session_state on every rerun
+        if ref_image is not None:
+            _suffix = "." + ref_image.name.rsplit(".", 1)[-1]
+            with tempfile.NamedTemporaryFile(delete=False, suffix=_suffix) as _f:
+                _f.write(ref_image.getbuffer())
+                st.session_state.ref_tmp_path = _f.name
+            if st.session_state.get("_ref_image_name") != ref_image.name:
+                st.session_state["_ref_image_name"] = ref_image.name
+                st.session_state.ref_processor = None
+                st.session_state.pop("ref_cx", None)
+                st.session_state.pop("ref_cy", None)
+        else:
+            st.session_state.ref_tmp_path = None
+
+        if ref_poni is not None:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".poni") as _f:
+                _f.write(ref_poni.getbuffer())
+                st.session_state.ref_poni_path = _f.name
+        else:
+            st.session_state.ref_poni_path = st.session_state.get("sample_poni_path")
+
+        if ref_mask is not None:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".edf") as _f:
+                _f.write(ref_mask.getbuffer())
+                st.session_state.ref_mask_path = _f.name
+        else:
+            st.session_state.ref_mask_path = st.session_state.get("sample_mask_path")
+
+        if ref_mtf is not None:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as _f:
+                _f.write(ref_mtf.getbuffer())
+                st.session_state.ref_mtf_path = _f.name
+        else:
+            st.session_state.ref_mtf_path = st.session_state.get("sample_mtf_path")
+
+        # --- 2. Create SAEDProcessor ---
+        st.markdown("#### 2️⃣ Create Processor & Detect Centre")
+
+        if st.button("🚀 Create SAEDProcessor", disabled=(ref_image is None),
+                     key="ref_create", type="primary"):
+            with st.spinner("Creating processor and detecting beam centre via isocurve…"):
+                try:
+                    _proc = SAEDProcessor(
                         st.session_state.ref_tmp_path,
                         poni_file=st.session_state.ref_poni_path,
-                        mask=st.session_state.get('ref_mask_path', None),
-                        mtf_file=st.session_state.get('ref_mtf_path', None),
-                        filter=mtf_filter,
-                        n_iterations=mtf_n_iterations,
-                        wiener_epsilon=mtf_wiener_epsilon,
-                        verbose=False
+                        mask=st.session_state.ref_mask_path,
+                        mtf_file=st.session_state.ref_mtf_path,
+                        wiener_epsilon=_r_mtf_eps,
+                        verbose=False,
                     )
-                    st.session_state.ref_processor.initial_center = st.session_state.ref_center
-                else:
-                    st.session_state.ref_processor = None
-                
-                st.success("✅ Processors created successfully! Go to 'Extract ePDF' tab.")
-                
-            except Exception as e:
-                st.error(f"❌ Error creating processors: {e}")
-                import traceback
-                st.error(traceback.format_exc())
+                    st.session_state.ref_processor = _proc
+                    st.session_state.ref_cx = int(round(_proc.center[0]))
+                    st.session_state.ref_cy = int(round(_proc.center[1]))
+                    st.rerun()
+                except Exception as _e:
+                    st.error(f"❌ {_e}")
+                    import traceback
+                    st.error(traceback.format_exc())
+
+        # --- 3. Image + editable centre ---
+        if st.session_state.get("ref_processor") is not None:
+            _proc = st.session_state.ref_processor
+            _cx = st.session_state.get("ref_cx", int(round(_proc.center[0])))
+            _cy = st.session_state.get("ref_cy", int(round(_proc.center[1])))
+
+            st.success(
+                f"✅ Processor ready — auto-detected centre: "
+                f"({int(round(_proc.center[0]))}, {int(round(_proc.center[1]))})"
+            )
+
+            _img_norm = np.log10(_proc.img / np.max(_proc.img) + 1e-4)
+            _fig_r = go.Figure(data=go.Heatmap(
+                z=_img_norm, colorscale="Jet",
+                hovertemplate="X: %{x}<br>Y: %{y}<extra></extra>",
+                showscale=False,
+            ))
+            _fig_r.add_trace(go.Scatter(
+                x=[_cx], y=[_cy], mode="markers",
+                marker=dict(symbol="cross", size=14, color="white",
+                            line=dict(color="white", width=2)),
+                showlegend=False,
+                hovertemplate=f"Centre: ({_cx}, {_cy})<extra></extra>",
+            ))
+            _fig_r.update_layout(
+                title="Reference image — crosshair = current beam centre",
+                xaxis_title="X (pixels)", yaxis_title="Y (pixels)",
+                height=480,
+                yaxis=dict(autorange="reversed", scaleanchor="x", scaleratio=1),
+                xaxis=dict(constrain="domain"),
+                margin=dict(t=50, b=40, l=50, r=10),
+            )
+            st.plotly_chart(_fig_r, use_container_width=True)
+
+            st.markdown("**Beam Centre — edit if needed, then click Update**")
+            _col_rx, _col_ry, _col_rupd = st.columns([2, 2, 2])
+            with _col_rx:
+                st.number_input("Center X", step=1, key="ref_cx")
+            with _col_ry:
+                st.number_input("Center Y", step=1, key="ref_cy")
+            with _col_rupd:
+                st.markdown("<br>", unsafe_allow_html=True)
+                if st.button("🔄 Update", key="ref_update_center"):
+                    _proc.center = (int(st.session_state.ref_cx),
+                                    int(st.session_state.ref_cy))
+                    st.success(
+                        f"✅ Centre updated to ({_proc.center[0]}, {_proc.center[1]})"
+                    )
+
+        elif ref_image is None:
+            st.info("📤 Upload a reference image above (optional).")
+        else:
+            st.info("👆 Click **Create SAEDProcessor** to detect the beam centre.")
 
 # ============================================================================
 # TAB 2: PDF EXTRACTION
@@ -453,16 +507,27 @@ with tab2:
         try:
             status_text.text("⏳ Integrating sample...")
             progress_bar.progress(25)
-            
-            # Integrate sample (MTF correction is applied automatically if mtf_file was provided)
-            q_sample, I_sample = st.session_state.sample_processor.integrate(plot=False)
-            
+
+            # Sync centre from the number-input fields (Tab 1) before integrating.
+            # This ensures the value displayed in the boxes is always the one used,
+            # whether it was auto-detected or manually entered.
+            _s_proc = st.session_state.sample_processor
+            _s_proc.center = (
+                int(st.session_state.get("sample_cx", round(_s_proc.center[0]))),
+                int(st.session_state.get("sample_cy", round(_s_proc.center[1]))),
+            )
+            q_sample, I_sample = _s_proc.integrate(plot=False)
+
             status_text.text("⏳ Integrating reference...")
             progress_bar.progress(50)
-            
-            # Integrate reference if available (MTF correction is applied automatically if mtf_file was provided)
+
             if st.session_state.ref_processor is not None:
-                q_ref, I_ref = st.session_state.ref_processor.integrate(plot=False)
+                _r_proc = st.session_state.ref_processor
+                _r_proc.center = (
+                    int(st.session_state.get("ref_cx", round(_r_proc.center[0]))),
+                    int(st.session_state.get("ref_cy", round(_r_proc.center[1]))),
+                )
+                q_ref, I_ref = _r_proc.integrate(plot=False)
                 # Interpolate to sample q grid
                 I_ref_interp = np.interp(q_sample, q_ref, I_ref)
             else:
