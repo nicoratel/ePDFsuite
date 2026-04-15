@@ -8,6 +8,5 @@ epdfsuite.recalibration
 
    .. autosummary::
    
-      recalibrate_with_beamstop
-      recalibrate_with_beamstop_noponi
+      recalibrate_from_isocurve
    

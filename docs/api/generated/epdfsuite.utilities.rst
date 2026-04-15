@@ -8,9 +8,9 @@ epdfsuite.utilities
 
    .. autosummary::
    
+      compute_dqe
       compute_mtf_slanted_edge
       deconvolve_mtf_2d
-      deconvolve_mtf_2d_rl
       detect_edge_angle_hough
       draw_mask
       estimate_wiener_epsilon_spectral
