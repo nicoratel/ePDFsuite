@@ -4,6 +4,8 @@
 
 It provides both a Python API for scripted workflows and an interactive graphical interface built with Streamlit.
 
+> See [Documentation](https://epdfsuite.readthedocs.io/en/latest/)
+
 ---
 
 ## What is ePDF?
