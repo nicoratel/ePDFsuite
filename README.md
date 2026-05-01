@@ -64,7 +64,7 @@ The app opens at `http://localhost:8501` in your browser.
 
 ## Usage
 
-> See `https://epdfsuite.readthedocs.io/en/latest/`
+> See [Documentation](https://epdfsuite.readthedocs.io/en/latest/)
 
 ## Notebooks
 
