@@ -1,8 +1,12 @@
+```yaml
 name: Publish package
 
 on:
   push:
-    branches: [main]   # ou ta branche principale
+    branches: [main]
+    paths-ignore:
+      - "README.md"
+      - "docs/**"
   release:
     types: [published]
 
@@ -14,11 +18,15 @@ jobs:
   publish-testpypi:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
-    - uses: actions/checkout@v4
+    - name: Checkout code
+      uses: actions/checkout@v4
 
-    - uses: actions/setup-python@v5
+    - name: Set up Python
+      uses: actions/setup-python@v5
       with:
         python-version: '3.11'
 
@@ -29,22 +37,38 @@ jobs:
 
     - name: Build package
       run: python -m build
+
+    - name: Check distribution
+      run: twine check dist/*
 
     - name: Upload to TestPyPI
       env:
         TWINE_USERNAME: __token__
         TWINE_PASSWORD: ${{ secrets.TEST_PYPI_API_TOKEN }}
-      run: twine upload --repository-url https://test.pypi.org/legacy/ dist/*
+      run: |
+        twine upload --skip-existing \
+                     --repository-url https://test.pypi.org/legacy/ \
+                     dist/*
+
+    - name: Test install from TestPyPI
+      run: |
+        pip install --index-url https://test.pypi.org/simple/ \
+                    --extra-index-url https://pypi.org/simple \
+                    ton-package
 
 
   publish-pypi:
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
-    - uses: actions/checkout@v4
+    - name: Checkout code
+      uses: actions/checkout@v4
 
-    - uses: actions/setup-python@v5
+    - name: Set up Python
+      uses: actions/setup-python@v5
       with:
         python-version: '3.11'
 
@@ -55,9 +79,13 @@ jobs:
 
     - name: Build package
       run: python -m build
+
+    - name: Check distribution
+      run: twine check dist/*
 
     - name: Upload to PyPI
       env:
         TWINE_USERNAME: __token__
         TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
       run: twine upload dist/*
+```
