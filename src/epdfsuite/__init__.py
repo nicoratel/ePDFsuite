@@ -3,8 +3,10 @@
 # Imports absolus pour charger les modules
 from .ePDFsuite import SAEDProcessor
 from .ePDFsuite import PDFResultsReference
+from .ePDFsuite import extract_epdf
 from .ePDFsuite import extract_ePDF_from_mutliple_files
 from .filereader import load_data
+from .calibration import perform_geometric_calibration
 # from .pdfanalysis import perform_automatic_pdf_analysis  # Module not found
 
 __version__ = "0.1.1"
@@ -13,8 +15,9 @@ __version__ = "0.1.1"
 __all__ = [
     'SAEDProcessor',
     'PDFResultsReference',
+    'extract_epdf',
     'load_data',
 	'extract_ePDF_from_multiple_files',
-	'perform_automatic_pdf_analysis',
-    
+	#'perform_automatic_pdf_analysis',
+    'perform_geometric_calibration',
 ]

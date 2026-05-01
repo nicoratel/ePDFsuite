@@ -27,6 +27,7 @@ class SAEDProcessor:
                 # deconvolution parameters
                 mtf_file=None,
                 wiener_epsilon=None,
+                dqe_file=None,
                 verbose=False):
         """
         Initialise a SAED data processor.
@@ -85,8 +86,14 @@ class SAEDProcessor:
         # load and apply MTF deconvolution (Wiener filter) if MTF file is provided
         if mtf_file is not None:
             self.ismtf = True
-            from .utilities import deconvolve_mtf_2d
-            self.img = deconvolve_mtf_2d(self.img, mtf_file, wiener_epsilon=wiener_epsilon)
+            if dqe_file is None:
+                from .utilities import deconvolve_mtf_2d
+                self.img = deconvolve_mtf_2d(self.img, mtf_file, wiener_epsilon=wiener_epsilon)
+                self.isdqe = False
+            else:
+                from .utilities import deconvolve_mtf_dqe_2d
+                self.img = deconvolve_mtf_dqe_2d(self.img, mtf_file, dqe_file)
+                self.isdqe = True
         else:
             self.ismtf = False
 
