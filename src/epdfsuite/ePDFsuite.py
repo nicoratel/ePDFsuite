@@ -171,21 +171,56 @@ class SAEDProcessor:
             valid = ~mask_bool.ravel()
             y_idx, x_idx = np.indices(self.img.shape)
             r = np.sqrt((x_idx - cx)**2 + (y_idx - cy)**2)
-            r_int = r.astype(int).ravel()
+            r_flat = r.ravel()
             img_flat = self.img.ravel()
-            radial_bins = np.bincount(r_int[valid], weights=img_flat[valid],
-                                      minlength=r_int.max() + 1)
-            radial_counts = np.bincount(r_int[valid], minlength=r_int.max() + 1)
-            I = radial_bins / radial_counts
-            q = np.arange(len(I))
+
+            # Sub-pixel (linear-interpolation) binning: each pixel's weight is
+            # split between its two neighbouring bins proportionally to the
+            # fractional distance to each bin centre, mimicking the CSR/LUT
+            # approach used by pyFAI and eliminating bin-boundary artefacts.
+            r_max = r_flat[valid].max()
+            bin_width = r_max / npt
+            # Continuous bin index for every valid pixel
+            r_norm = r_flat[valid] / bin_width          # in [0, npt]
+            k = r_norm.astype(int)                      # lower bin
+            frac = r_norm - k                           # fractional part in [0, 1)
+            k  = np.clip(k,     0, npt - 1)
+            k1 = np.clip(k + 1, 0, npt - 1)
+            img_v = img_flat[valid]
+            weights_sum = np.zeros(npt)
+            counts      = np.zeros(npt)
+            np.add.at(weights_sum, k,  (1.0 - frac) * img_v)
+            np.add.at(weights_sum, k1, frac          * img_v)
+            np.add.at(counts,      k,  (1.0 - frac))
+            np.add.at(counts,      k1, frac)
+            with np.errstate(invalid='ignore', divide='ignore'):
+                I = np.where(counts > 0, weights_sum / counts, 0.0)
+            # Bin centres in pixel units (used for q conversion below)
+            edges = np.linspace(0.0, r_max, npt + 1)   # kept for r_centers
+
+            # Bin centres in pixels → convert to q using the hyperspy scale
+            r_centers = 0.5 * (edges[:-1] + edges[1:])
             if self.units == '1/nm':
-                q = q * self.scale * 2 * np.pi / 10
+                q = r_centers * self.scale * 2 * np.pi / 10
+                # Solid angle correction: derive 2θ from q and wavelength
+                # q = 4π sin(θ)/λ  →  sin(θ) = qλ/(4π)
+                wavelength_A = self.metadata.get('wavelength', None)
+                if wavelength_A is not None:
+                    sin_theta = np.clip(q * wavelength_A / (4 * np.pi), -1.0, 1.0)
+                    two_theta = 2 * np.arcsin(sin_theta)
+                    cos3 = np.where(np.cos(two_theta) > 0, np.cos(two_theta) ** 3, 1.0)
+                    I = I / cos3
             elif self.units == 'mrad':
-                theta = q * self.scale * 1e-3
+                # theta (Bragg half-angle) in radians; detector angle = 2θ
+                theta = r_centers * self.scale * 1e-3
                 q = 4 * np.pi * np.sin(theta) / self.metadata['wavelength']
                 q /= self.binning
+                # Solid angle correction using detector angle 2θ
+                two_theta = 2 * theta
+                cos3 = np.where(np.cos(two_theta) > 0, np.cos(two_theta) ** 3, 1.0)
+                I = I / cos3
             else:
-                q = q * self.scale * 2 * np.pi
+                q = r_centers * self.scale * 2 * np.pi
                 
 
         
