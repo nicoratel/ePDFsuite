@@ -212,7 +212,7 @@ class SAEDProcessor:
                     I = I / cos3
             elif self.units == 'mrad':
                 # theta (Bragg half-angle) in radians; detector angle = 2θ
-                theta = r_centers * self.scale * 1e-3
+                theta = r_centers * self.scale * 1e-3 / 2
                 q = 4 * np.pi * np.sin(theta) / self.metadata['wavelength']
                 q /= self.binning
                 # Solid angle correction using detector angle 2θ
