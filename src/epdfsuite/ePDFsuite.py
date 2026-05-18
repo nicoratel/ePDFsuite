@@ -219,7 +219,7 @@ class SAEDProcessor:
                 two_theta = 2 * theta
                 cos3 = np.where(np.cos(two_theta) > 0, np.cos(two_theta) ** 3, 1.0)
                 I = I / cos3
-            else:
+            else: # assume units are already in s (1/Å)
                 q = r_centers * self.scale * 2 * np.pi
                 
 
@@ -272,10 +272,11 @@ class SAEDProcessor:
             ``level_range``, ``rms_rel_max``, ``min_arc_deg``,
             ``cluster_window``).
         """
-        recalibrate_from_isocurve(
+        c_x,c_y = recalibrate_from_isocurve(
             self.img, mask=_mask_as_array(self.mask), plot=True,
             initial_center=self.center, **kwargs
         )
+        self.center = (c_x, c_y)
 
     def inspect_histogram(self, bins=256, log_scale=True, exclude_zero=False,
                           saturation_threshold=0.98, percentile_clip=99.9999):
