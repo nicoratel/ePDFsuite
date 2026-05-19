@@ -97,12 +97,6 @@ class SAEDProcessor:
         else:
             self.ismtf = False
 
-        # check binning
-        if self.metadata['image_height'] != self.img.shape[0] or self.metadata['image_width'] != self.img.shape[1]:
-            self.binning = self.metadata['image_height'] / self.img.shape[0]
-        else:
-            self.binning = 1
-
         # Determine beam centre automatically via iso-intensity contour method.
         # Fall back to the intensity-maximum if isocurve detection fails.
         try:
@@ -212,9 +206,9 @@ class SAEDProcessor:
                     I = I / cos3
             elif self.units == 'mrad':
                 # theta (Bragg half-angle) in radians; detector angle = 2θ
-                theta = r_centers * self.scale * 1e-3 / 2
+                theta = (r_centers * self.scale * 1e-3) / 2
                 q = 4 * np.pi * np.sin(theta) / self.metadata['wavelength']
-                q /= self.binning
+                
                 # Solid angle correction using detector angle 2θ
                 two_theta = 2 * theta
                 cos3 = np.where(np.cos(two_theta) > 0, np.cos(two_theta) ** 3, 1.0)
