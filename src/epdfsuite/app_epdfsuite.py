@@ -132,6 +132,10 @@ with tab1:
             "MTF file (optional)",
             key="sample_mtf",
         )
+        sample_dqe = st.file_uploader(
+            "DQE file (optional)",
+            key="sample_dqe",
+        )
 
         # MTF deconvolution parameters
         if sample_mtf is not None:
@@ -187,6 +191,13 @@ with tab1:
         else:
             st.session_state.sample_mtf_path = None
 
+        if sample_dqe is not None:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as _f:
+                _f.write(sample_dqe.getbuffer())
+                st.session_state.sample_dqe_path = _f.name
+        else:
+            st.session_state.sample_dqe_path = None
+
         # --- 2. Create SAEDProcessor ---
         st.markdown("#### 2️⃣ Create Processor & Detect Centre")
 
@@ -199,6 +210,7 @@ with tab1:
                         poni_file=st.session_state.sample_poni_path,
                         mask=st.session_state.sample_mask_path,
                         mtf_file=st.session_state.sample_mtf_path,
+                        dqe_file=st.session_state.get("sample_dqe_path"),
                         wiener_epsilon=_s_mtf_eps,
                         verbose=False,
                     )
@@ -315,6 +327,12 @@ with tab1:
         )
         if ref_mtf is None and sample_mtf is not None:
             st.caption(f"ℹ️ Will use sample MTF: {sample_mtf.name}")
+        ref_dqe = st.file_uploader(
+            "DQE file (optional, defaults to sample DQE)",
+            key="ref_dqe",
+        )
+        if ref_dqe is None and sample_dqe is not None:
+            st.caption(f"ℹ️ Will use sample DQE: {sample_dqe.name}")
 
         # MTF deconvolution parameters
         if ref_mtf is not None:
@@ -371,6 +389,13 @@ with tab1:
         else:
             st.session_state.ref_mtf_path = st.session_state.get("sample_mtf_path")
 
+        if ref_dqe is not None:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as _f:
+                _f.write(ref_dqe.getbuffer())
+                st.session_state.ref_dqe_path = _f.name
+        else:
+            st.session_state.ref_dqe_path = st.session_state.get("sample_dqe_path")
+
         # --- 2. Create SAEDProcessor ---
         st.markdown("#### 2️⃣ Create Processor & Detect Centre")
 
@@ -383,6 +408,7 @@ with tab1:
                         poni_file=st.session_state.ref_poni_path,
                         mask=st.session_state.ref_mask_path,
                         mtf_file=st.session_state.ref_mtf_path,
+                        dqe_file=st.session_state.get("ref_dqe_path"),
                         wiener_epsilon=_r_mtf_eps,
                         verbose=False,
                     )
