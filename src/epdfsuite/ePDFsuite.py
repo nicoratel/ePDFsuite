@@ -52,6 +52,9 @@ class SAEDProcessor:
         wiener_epsilon : float, optional
             Regularisation parameter for the Wiener filter.
             If ``None``, read from column 3 of the MTF file.
+        dqe_file : str, optional
+            Path to the DQE file used for deconvolution.
+            If ``None``, Wiener deconvolution if MTF is available, else no deconvolution
         verbose : bool, optional
             If ``True``, print metadata and detector info. Default is ``False``.
         """
