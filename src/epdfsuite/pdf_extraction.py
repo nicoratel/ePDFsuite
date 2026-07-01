@@ -237,9 +237,9 @@ def compute_ePDF(
     Follows the PDFgetX3 formalism adapted for electron scattering:
 
     1. Optional background subtraction: ``I = Iexp - bgscale * Iref``
-    2. Normalisation by the composition-averaged squared scattering factor <f²>(Q)
-    3. Construction of the reduced structure function:
-       ``F(Q) = Q * (I_norm / I_inf - 1)``
+     2. High-Q scaling ``alpha`` so that ``alpha*I(Q)`` matches ``<f²>(Q)``
+     3. Construction of the reduced structure function from
+         ``S(Q)-1 = (alpha*I(Q) - <f²>(Q)) / <f>(Q)²`` and ``F(Q)=Q*(S(Q)-1)``
     4. Polynomial background removal (PDFgetX3 convention, controlled by ``rpoly``)
     5. Optional Lorch modification function to suppress Fourier ripples
     6. Sine Fourier transform to obtain G(r)
@@ -289,12 +289,14 @@ def compute_ePDF(
 
     Notes
     -----
-    The normalisation factor ``I_inf`` is estimated as the mean intensity in
-    the top 10 % of the Q range (``q > 0.9 * qmax``).
+    The scale factor ``alpha`` is estimated from the top 10 % of the Q range
+    (``q > 0.9 * qmax``) so that ``alpha * I(Q)`` matches ``<f²>(Q)`` in the
+    high-Q region. The reduced function is then built explicitly as
+    ``S(Q)-1 = (alpha*I(Q) - <f²>(Q)) / <f>(Q)²`` and ``F(Q)=Q*(S(Q)-1)``.
     """
-    if qmax is None:
+    if qmax is None or qmax > q.max():
         qmax = q.max()
-    if qmaxinst is None:
+    if qmaxinst is None or qmaxinst > q.max():
         qmaxinst = qmax
     Iraw= Iexp.copy()  # Keep a copy of the raw intensity for plotting
 
@@ -333,13 +335,24 @@ def compute_ePDF(
     )
     f2avg = np.interp(q, q_f2, f2avg)
 
-    mask_inf = q > 0.9 * qmax
-    I_inf = np.mean(Iexp[mask_inf])
+    q_f, favg = compute_avg_scattering_factor(
+        composition,
+        x_max=qmax,
+        x_step=qstep,
+        qvalues=True,
+        xray=False,
+    )
+    favg = np.interp(q, q_f, favg)
 
-    Inorm = Iexp / f2avg
+    mask_inf = q > 0.9 * qmax
+    if np.any(mask_inf):
+        alpha = np.mean(f2avg[mask_inf]) / np.mean(Iexp[mask_inf])
+    else:
+        alpha = np.mean(f2avg) / np.mean(Iexp)
 
     # --- Modified intensity F(Q) ---
-    Fm = q * (Inorm / I_inf - 1)
+    S_minus_1 = (alpha * Iexp - f2avg) / (favg ** 2)
+    Fm = q * S_minus_1
 
     # --- Polynomial background (PDFgetX3 philosophy) ---
     background = fit_polynomial_background(
@@ -397,6 +410,205 @@ def compute_ePDF(
             ax[1].set_ylim([0, 1])  # Fallback to default limits if no valid values
 
         # Plot 3: Final PDF
+        ax[2].plot(r, G, label=f"rpoly={rpoly:.2f}")
+        ax[2].legend()
+        ax[2].set_xlabel("r ($\\AA$)")
+        ax[2].set_ylabel("G(r)")
+
+        fig.tight_layout()
+        plt.show()
+
+    return r, G
+
+
+# --------------------------------------------------
+# PDFgetX3-like PDF (X-RAYS)
+# --------------------------------------------------
+
+def compute_xPDF(
+    q,
+    Iexp,
+    composition,
+    Iref=None,
+    bgscale=1.0,
+    qmin=0.3,
+    qmax=None,
+    qmaxinst=None,
+    rmin=0.0,
+    rmax=50.0,
+    rstep=0.01,
+    rpoly=1.4,
+    Lorch=True,
+    plot=False,
+):
+    """
+    Compute the X-ray Pair Distribution Function G(r) from an azimuthally
+    integrated diffraction intensity profile.
+
+    Follows the PDFgetX3 formalism adapted for X-ray scattering:
+
+    1. Optional background subtraction: ``I = Iexp - bgscale * Iref``
+     2. High-Q scaling ``alpha`` so that ``alpha*I(Q)`` matches ``<f²>(Q)``
+     3. Construction of the reduced structure function from
+         ``S(Q)-1 = (alpha*I(Q) - <f²>(Q)) / <f>(Q)²`` and ``F(Q)=Q*(S(Q)-1)``
+    4. Polynomial background removal (PDFgetX3 convention, controlled by ``rpoly``)
+    5. Optional Lorch modification function to suppress Fourier ripples
+    6. Sine Fourier transform to obtain G(r)
+
+    Parameters
+    ----------
+    q : ndarray
+        Momentum transfer axis in Å⁻¹.
+    Iexp : ndarray
+        Experimental azimuthally averaged intensity profile.
+    composition : str
+        Chemical formula of the sample (e.g. ``'SiO2'``, ``'Al2O3'``).
+    Iref : ndarray, optional
+        Reference (background) intensity profile. If its length differs from
+        ``Iexp``, it is interpolated onto the ``q`` grid. Default is ``None``.
+    bgscale : float, optional
+        Scaling factor applied to the reference before subtraction. Default is 1.0.
+    qmin : float, optional
+        Minimum Q used for the Fourier transform (Å⁻¹). Default is 0.3.
+    qmax : float, optional
+        Maximum Q used for the Fourier transform (Å⁻¹). Defaults to ``q.max()``.
+    qmaxinst : float, optional
+        Maximum Q used for the polynomial background fit. Defaults to ``qmax``.
+        Useful when the data are noisy near ``qmax``.
+    rmin : float, optional
+        Minimum real-space distance r (Å). Default is 0.0.
+    rmax : float, optional
+        Maximum real-space distance r (Å). Default is 50.0.
+    rstep : float, optional
+        Step size in real space (Å). Default is 0.01.
+    rpoly : float, optional
+        Polynomial degree control for background removal (PDFgetX3 convention).
+        Default is 1.4.
+    Lorch : bool, optional
+        If ``True`` (default), apply the Lorch modification function
+        ``sinc(Q/Qmax)`` before the Fourier transform to reduce termination ripples.
+    plot : bool, optional
+        If ``True``, display diagnostic plots of the raw intensities, F(Q),
+        and G(r). Default is ``False``.
+
+    Returns
+    -------
+    r : ndarray
+        Real-space distance axis in Å.
+    G : ndarray
+        Reduced pair distribution function G(r) in Å⁻².
+
+    Notes
+    -----
+    The scale factor ``alpha`` is estimated from the top 10 % of the Q range
+    (``q > 0.9 * qmax``) so that ``alpha * I(Q)`` matches ``<f²>(Q)`` in the
+    high-Q region. The reduced function is then built explicitly as
+    ``S(Q)-1 = (alpha*I(Q) - <f²>(Q)) / <f>(Q)²`` and ``F(Q)=Q*(S(Q)-1)``.
+    """
+    if qmax is None or qmax > q.max():
+        qmax = q.max()
+    if qmaxinst is None or qmaxinst > q.max():
+        qmaxinst = qmax
+    Iraw = Iexp.copy()
+
+    # --- Interpolate over NaN/Inf bins (from masked radial bins) ---
+    finite_exp = np.isfinite(Iexp)
+    if not np.all(finite_exp):
+        Iexp = np.interp(q, q[finite_exp], Iexp[finite_exp])
+        Iraw = Iexp.copy()
+
+    # --- Background subtraction ---
+    if Iref is not None:
+        finite_ref = np.isfinite(Iref)
+        if not np.all(finite_ref) and finite_ref.any():
+            q_ref_full = np.linspace(q[0], q[-1], len(Iref))
+            Iref = np.interp(q, q_ref_full[finite_ref], Iref[finite_ref])
+        elif len(Iref) != len(Iexp):
+            q_ref = np.linspace(q[0], q[-1], len(Iref))
+            Iref = np.interp(q, q_ref, Iref)
+
+    if Iref is not None:
+        Iexp = Iexp - bgscale * Iref
+
+    qstep = q[1] - q[0]
+
+    # --- X-ray scattering normalization ---
+    q_f2, f2avg = compute_f2avg(
+        composition,
+        x_max=qmax,
+        x_step=qstep,
+        qvalues=True,
+        xray=True,
+    )
+    f2avg = np.interp(q, q_f2, f2avg)
+
+    q_f, favg = compute_avg_scattering_factor(
+        composition,
+        x_max=qmax,
+        x_step=qstep,
+        qvalues=True,
+        xray=True,
+    )
+    favg = np.interp(q, q_f, favg)
+
+    mask_inf = q > 0.9 * qmax
+    if np.any(mask_inf):
+        alpha = np.mean(f2avg[mask_inf]) / np.mean(Iexp[mask_inf])
+    else:
+        alpha = np.mean(f2avg) / np.mean(Iexp)
+
+    # --- Modified intensity F(Q) ---
+    S_minus_1 = (alpha * Iexp - f2avg) / (favg ** 2)
+    Fm = q * S_minus_1
+
+    # --- Polynomial background (PDFgetX3 philosophy) ---
+    background = fit_polynomial_background(
+        q, Fm, rpoly=rpoly, qmin=qmin, qmax=qmaxinst
+    )
+
+    Fc = Fm - background
+
+    # --- Fourier transform ---
+    r = np.arange(rmin, rmax + rstep, rstep)
+    mask = (q >= qmin) & (q <= qmax)
+    qv = q[mask]
+
+    if Lorch:
+        Fv = Fc[mask] * np.sinc(qv / qmax)
+    else:
+        Fv = Fc[mask]
+
+    integrand = Fv[None, :] * np.sin(np.outer(r, qv))
+    trapz_func = getattr(np, 'trapezoid', np.trapz)
+    G = (2 / np.pi) * trapz_func(integrand, qv, axis=1)
+
+    # Optional diagnostic plots
+    if plot:
+        fig, ax = plt.subplots(3, figsize=(4, 6))
+
+        ax[0].plot(q, Iraw, label="Iexp")
+        if Iref is not None:
+            ax[0].plot(q, bgscale * Iref, label="Ref*bgscale")
+        ax[0].legend()
+        ax[0].set_xlabel("Q ($\\AA^{-1}$)")
+        ax[0].set_ylabel("Intensity")
+        mask_plot = (q >= qmin) & (q <= qmax)
+        ax[0].set_xlim([qmin, qmax])
+        Iraw_valid = Iraw[mask_plot][np.isfinite(Iraw[mask_plot])]
+        if len(Iraw_valid) > 0:
+            ax[0].set_ylim([np.min(Iraw_valid), np.max(Iraw_valid)])
+
+        ax[1].plot(q, Fc, label=f"rpoly={rpoly:.2f}")
+        ax[1].legend()
+        ax[1].set_xlabel("Q ($\\AA^{-1}$)")
+        ax[1].set_ylabel("F(Q)")
+        ax[1].set_xlim([qmin, qmax])
+        Fc_valid = Fc[mask_plot][np.isfinite(Fc[mask_plot])]
+        if len(Fc_valid) > 0:
+            ax[1].set_ylim([np.min(Fc_valid), np.max(Fc_valid)])
+        else:
+            ax[1].set_ylim([0, 1])
+
         ax[2].plot(r, G, label=f"rpoly={rpoly:.2f}")
         ax[2].legend()
         ax[2].set_xlabel("r ($\\AA$)")
