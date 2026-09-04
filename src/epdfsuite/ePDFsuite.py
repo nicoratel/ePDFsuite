@@ -28,7 +28,10 @@ class SAEDProcessor:
                 mtf_file=None,
                 wiener_epsilon=None,
                 dqe_file=None,
-                verbose=False):
+                verbose=False,
+                precession_angle=None,
+
+                ):
         """
         Initialise a SAED data processor.
 
@@ -57,6 +60,8 @@ class SAEDProcessor:
             If ``None``, Wiener deconvolution if MTF is available, else no deconvolution
         verbose : bool, optional
             If ``True``, print metadata and detector info. Default is ``False``.
+        precession_angle : float, optional
+            The precession angle of the electron beam in degrees. If ``None``, the angle is not used.
         """
         self.dm4_file = image_file
         self.poni_file = poni_file
@@ -116,6 +121,9 @@ class SAEDProcessor:
                 'Refine manually in the app.'
             )
         self.center = (cx, cy)
+        self.precession_angle = precession_angle
+        if precession_angle ==0:
+            self.precession_angle=None
 
             
 
@@ -218,10 +226,21 @@ class SAEDProcessor:
                 I = I / cos3
             else: # assume units are already in s (1/Å)
                 q = r_centers * self.scale * 2 * np.pi
-                
-
         
 
+        # perform intensity corrections if precession is used
+        if self.precession_angle is not None:
+            # Convert precession angle from degrees to radians
+            alpha_rad = np.radians(self.precession_angle)
+            R0 = 2 * np.pi * np.sin(alpha_rad) / self.metadata['wavelength'] 
+            # Apply the correction factor: I_corrected = I / q*racine(1-q/2R0)) where R0=2pi*prec_angle/lambda
+            I = I / (q * np.sqrt(1 - q / (2 * R0)))        
+            print("Intensity corrections induced by precession have been performed.\n")
+            # limit on qmax imposed by precession angle:
+            qmax_prec = np.sin(alpha_rad)*4*np.pi / self.metadata['wavelength']
+            print(f'Intensity corrections impose qmax = {qmax_prec:.2f} $\AA^{-1}$')
+            print('See K. Gjonnes Ultramicroscopy 69 1-11 (1997) for more details')
+        
         if plot:
             plt.figure()
             plt.semilogy(q, I)
@@ -230,9 +249,8 @@ class SAEDProcessor:
             plt.title('Azimuthally Integrated SAED Pattern')
             plt.grid()
             plt.show()
-        
         return q, I
-    
+
     def plot(self,vmin=-4, vmax=0,cmap='jet',display_mask=False):
         plt.figure()
         if display_mask:
@@ -406,7 +424,8 @@ class SAEDProcessor:
                      qmin=1.5,
                      qmax=24,
                      qmaxinst=24,
-                     rpoly=1.4):
+                     rpoly=1.4
+                     ):
         """
         Extract the ePDF from the SAED data (convenience wrapper).
 
@@ -441,6 +460,19 @@ class SAEDProcessor:
             Q-range limits in Å⁻¹ for PDF computation.
         rpoly : float, optional
             Polynomial background degree control (PDFgetX3 convention).
+        correct_multiple_scattering : bool, optional
+            If ``True``, apply the elastic multiple-scattering correction
+            (see :func:`~epdfsuite.multiple_scattering.correct_multiple_scattering`)
+            to the sample intensity before PDF extraction, using ``D``,
+            ``HV`` and ``density``. Default is ``False``.
+        D : float, optional
+            Nanoparticle diameter (nm), used to estimate the thickness
+            traversed by the beam (``t = 2/3 * D``). Default is 15.
+        HV : float, optional
+            Accelerating voltage (kV). Default is 200.
+        density : float, optional
+            Mass density of the sample (g/cm³), used to estimate the
+            elastic mean free path. Default is 19.3 (Au).
 
         Returns
         -------
@@ -471,7 +503,7 @@ class SAEDProcessor:
             qmin=qmin,
             qmax=qmax,
             qmaxinst=qmaxinst,
-            rpoly=rpoly,
+            rpoly=rpoly
         )
 
 
@@ -492,7 +524,8 @@ def extract_epdf(sample_processor,
                  qmin=1.5,
                  qmax=24,
                  qmaxinst=24,
-                 rpoly=1.4):
+                 rpoly=1.4
+                 ):
     """
     Extract the electron Pair Distribution Function (ePDF) from SAED data.
 
@@ -530,6 +563,7 @@ def extract_epdf(sample_processor,
         background fitting.
     rpoly : float, optional
         Polynomial degree control (PDFgetX3 convention). Default is 1.4.
+    
 
     Returns
     -------
