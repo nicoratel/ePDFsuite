@@ -6,7 +6,7 @@ from .camera_library import DETECTOR_LIBRARY
 import numpy as np
 
 
-def extract_camera_type(metadata, detector_lib=DETECTOR_LIBRARY):
+def extract_camera_type(metadata, original_metadata=None, detector_lib=DETECTOR_LIBRARY):
     """
     Identify the camera type from HyperSpy metadata using regex alias matching.
 
@@ -17,6 +17,9 @@ def extract_camera_type(metadata, detector_lib=DETECTOR_LIBRARY):
     ----------
     metadata : HyperSpy metadata object
         Metadata loaded from a DM4 (or other HyperSpy-supported) file.
+    original_metadata : HyperSpy metadata object, optional
+        Raw original metadata tree (for example ``image.original_metadata``)
+        scanned as a fallback when ``General.title`` is not camera-specific.
     detector_lib : dict, optional
         Detector library to search. Defaults to the built-in
         :data:`DETECTOR_LIBRARY`.
@@ -28,39 +31,98 @@ def extract_camera_type(metadata, detector_lib=DETECTOR_LIBRARY):
     camera_title : str or None
         Raw title string found in the metadata, or ``None`` if unavailable.
     """
+    def _match_from_title(title):
+        if not isinstance(title, str):
+            return None
+
+        title_clean = title.strip()
+        if not title_clean:
+            return None
+
+        # First, search for exact match
+        if title_clean in detector_lib:
+            return title_clean, title_clean
+
+        # Then, search by regex on aliases
+        title_lower = title_clean.lower()
+        for camera_key, params in detector_lib.items():
+            if 'aliases' not in params:
+                continue
+            for alias_pattern in params['aliases']:
+                try:
+                    pattern = re.compile(alias_pattern, re.IGNORECASE)
+                    if pattern.search(title_lower):
+                        return camera_key, title_clean
+                except re.error:
+                    # If not valid regex, search as substring
+                    if alias_pattern.lower() in title_lower:
+                        return camera_key, title_clean
+
+        return None
+
+    def _collect_camera_candidates(obj, prefix=''):
+        """Collect string values from camera-related metadata nodes."""
+        candidates = []
+        camera_like_keys = (
+            'camera', 'detector', 'device', 'source', 'signal_name',
+            'device_name', 'source_model', 'name', 'title',
+        )
+
+        try:
+            if hasattr(obj, 'keys'):
+                for key in obj.keys():
+                    value = obj[key]
+                    key_str = str(key)
+                    path = f"{prefix}.{key_str}" if prefix else key_str
+                    key_lower = key_str.lower()
+
+                    if isinstance(value, str) and any(k in key_lower for k in camera_like_keys):
+                        candidates.append((path, value))
+
+                    if hasattr(value, 'keys'):
+                        candidates.extend(_collect_camera_candidates(value, path))
+        except Exception:
+            pass
+
+        return candidates
+
+    tried_titles = []
+
     try:
-        if hasattr(metadata, 'General'):
-            general = metadata.General
-            if hasattr(general, 'title'):
-                title = general.title
-                
-                
-                # First, search for exact match
-                if title in detector_lib:
-                    return title, title
-                
-                # Then, search by regex on aliases
-                title_lower = title.lower()
-                
-                for camera_key, params in detector_lib.items():
-                    if 'aliases' in params:
-                        for alias_pattern in params['aliases']:
-                            try:
-                                # Compile pattern as regex
-                                pattern = re.compile(alias_pattern, re.IGNORECASE)
-                                if pattern.search(title_lower):                                    
-                                    return camera_key, title
-                            except re.error:
-                                # If not valid regex, search as substring
-                                if alias_pattern.lower() in title_lower:                                    
-                                    return camera_key, title
-                
-                # No match found
-                print(f"  ⚠ No match found in aliases")
-                return None, title
+        # Priority 1: General.title if present
+        if hasattr(metadata, 'General') and hasattr(metadata.General, 'title'):
+            title = metadata.General.title
+            tried_titles.append(title)
+            matched = _match_from_title(title)
+            if matched is not None:
+                return matched
+
+        # Priority 2: scan metadata and original_metadata for camera-like fields
+        candidates = []
+        if metadata is not None:
+            candidates.extend(_collect_camera_candidates(metadata, 'metadata'))
+        if original_metadata is not None:
+            candidates.extend(_collect_camera_candidates(original_metadata, 'original_metadata'))
+
+        seen = set()
+        for _, value in candidates:
+            title = value.strip() if isinstance(value, str) else None
+            if not title or title in seen:
+                continue
+            seen.add(title)
+            tried_titles.append(title)
+
+            matched = _match_from_title(title)
+            if matched is not None:
+                return matched
+
+        if tried_titles:
+            print("  ⚠ No match found in aliases")
+            return None, tried_titles[0]
+
     except Exception as e:
         print(f"Error extracting camera type: {e}")
-    
+
     return None, None
 
 def _search_metadata_recursive(obj, target_keys, depth=0, max_depth=10):
@@ -306,7 +368,7 @@ def load_data(file, normalize=True, verbose=True):
     raw_image = image.data
     
     # Extract detector info automatically
-    camera_key, camera_title = extract_camera_type(metadata)
+    camera_key, camera_title = extract_camera_type(metadata, getattr(image, 'original_metadata', None))
     
     # Extract wavelength information
     wavelength_info = extract_wavelength(metadata)
