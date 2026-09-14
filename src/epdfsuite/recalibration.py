@@ -2,6 +2,7 @@ import numpy as np
 from skimage import measure
 from pyFAI.utils.ellipse import fit_ellipse as pyfai_fit_ellipse
 import matplotlib.pyplot as plt
+import ediff as ed
 
 def _fit_circle_algebraic(y_pts, x_pts):
     """Algebraic (Kåsa) circle fit on a set of 2-D points.
@@ -129,6 +130,12 @@ def recalibrate_from_isocurve(image, n_levels=7, level_range=(0.15, 0.75),
     # Boolean mask of invalid pixels
     invalid = np.asarray(mask, dtype=bool) if mask is not None \
         else np.zeros(img.shape, dtype=bool)
+    if invalid.shape != img.shape:
+        raise ValueError(
+            f"recalibrate_from_isocurve: mask shape {invalid.shape} does not "
+            f"match image shape {img.shape}. Make sure the mask was drawn "
+            "for this specific image."
+        )
 
     # --- Normalise using only VALID pixels ---
     valid_vals = img[~invalid]
@@ -309,8 +316,8 @@ def recalibrate_from_isocurve(image, n_levels=7, level_range=(0.15, 0.75),
                          label=f'Initial ({x_rough:.0f}, {y_rough:.0f})')
         axes[0].plot(x_c, y_c, 'r+', markersize=16, markeredgewidth=2.5,
                      label=f'Centre ({x_c:.1f}, {y_c:.1f})')
-        axes[0].set_title('Iso-intensity contours', fontsize=13)
-        axes[0].legend(fontsize=8, loc='lower right')
+        #axes[0].set_title('Iso-intensity contours', fontsize=13)
+        axes[0].legend(fontsize=12, loc='lower right')
         axes[0].grid(True, alpha=0.3)
 
         # Panel 2: cluster members coloured by RMS, outliers as grey ×
@@ -322,31 +329,190 @@ def recalibrate_from_isocurve(image, n_levels=7, level_range=(0.15, 0.75),
         sc = axes[1].scatter(x_centers[in_cluster], y_centers[in_cluster],
                              c=rms_arr[in_cluster], cmap='RdYlGn_r', s=40, zorder=3,
                              label=f'Cluster [{int(in_cluster.sum())}]')
-        plt.colorbar(sc, ax=axes[1], label='RMS residual (px)')
+        #plt.colorbar(sc, ax=axes[1], label='RMS residual (px)')
         if x_rough is not None:
             axes[1].plot(x_rough, y_rough, 'b+', markersize=14,
                          markeredgewidth=2,
                          label=f'Initial ({x_rough:.0f}, {y_rough:.0f})')
         axes[1].plot(x_c, y_c, 'r*', markersize=18, zorder=4,
                      label=f'Median ({x_c:.1f}, {y_c:.1f})')
-        axes[1].set_title('Centre estimates – cluster analysis', fontsize=13)
-        axes[1].legend(fontsize=9)
+        #axes[1].set_title('Centre estimates – cluster analysis', fontsize=13)
+        axes[1].legend(fontsize=12)
         axes[1].set_aspect('equal', 'box')
         axes[1].invert_yaxis()
         axes[1].grid(True, alpha=0.3)
 
         for ax in axes:
-            ax.set_xlabel('X (pixels)', fontsize=11)
-            ax.set_ylabel('Y (pixels)', fontsize=11)
+            ax.set_xlabel('X (pixels)', fontsize=14)
+            ax.set_ylabel('Y (pixels)', fontsize=14)
         n_rej = len(_rejected)
         n_out = int((~in_cluster).sum())
-        fig.suptitle(
-            f'recalibrate_from_isocurve  |  cluster: {int(in_cluster.sum())} pts'
-            f'  |  outliers: {n_out}  |  shape-rejected: {n_rej}'
-            f'  |  centre = ({x_c:.2f}, {y_c:.2f}) px',
-            fontsize=11
-        )
+        #fig.suptitle(
+        #    f'recalibrate_from_isocurve  |  cluster: {int(in_cluster.sum())} pts'
+        #    f'  |  outliers: {n_out}  |  shape-rejected: {n_rej}'
+        #    f'  |  centre = ({x_c:.2f}, {y_c:.2f}) px',
+        #    fontsize=11
+        #)
         fig.tight_layout()
         plt.show()
 
+    return x_c, y_c
+
+
+def _plot_center_log(image, x_c, y_c, r=None, title=None, csquare=None,
+                      axes_off=False, out_file=None, out_dpi=200):
+    """Diagnostic plot: log-scaled, normalised image with the fitted centre.
+
+    Parameters
+    ----------
+    image : ndarray
+        2-D image (original intensity scale) to display.
+    x_c, y_c : float
+        Fitted centre coordinates (pixels), in the same frame as *image*.
+    r : float or None, optional
+        Radius (pixels) of the refinement ring; drawn as a circle if given.
+    title : str or None, optional
+        Axes title.
+    csquare : int or None, optional
+        If given, zoom on the central square of this size (pixels).
+    axes_off : bool, optional
+        If ``True``, hide the axes ticks/labels.
+    out_file : str or None, optional
+        If given, save the figure to this path.
+    out_dpi : int, optional
+        DPI used when saving *out_file*. Default is ``200``.
+    """
+    from matplotlib.colors import LogNorm
+
+    img = np.asarray(image, dtype=float)
+    # Normalise to [0, 1] on valid (finite) pixels, then shift away from 0
+    # so the whole range can be displayed on a log scale.
+    finite = np.isfinite(img)
+    vmin0 = np.nanpercentile(img[finite], 0.5)
+    vmax0 = np.nanpercentile(img[finite], 99.5)
+    img_norm = np.clip((img - vmin0) / (vmax0 - vmin0 + 1e-10), 1e-4, 1.0)
+
+    fig, ax = plt.subplots(figsize=(6, 6))
+    im = ax.imshow(img_norm, cmap='inferno', origin='upper',
+                    norm=LogNorm(vmin=1e-4, vmax=1.0))
+    ax.scatter(x_c, y_c, color='cyan', marker='+', s=140, lw=2,
+               label=f'centre ({x_c:.1f}, {y_c:.1f})')
+    if r is not None:
+        circ = plt.Circle((x_c, y_c), r, color='cyan', fill=False, lw=1.2,
+                           label='refinement ring')
+        ax.add_patch(circ)
+
+    if title:
+        ax.set_title(title)
+    ax.legend(loc='upper right', frameon=True, fontsize=9)
+    fig.colorbar(im, ax=ax, label='Normalised intensity (log)')
+
+    if csquare is not None:
+        h, w = img.shape
+        half = csquare / 2.0
+        ax.set_xlim(x_c - half, x_c + half)
+        ax.set_ylim(y_c + half, y_c - half)
+
+    if axes_off:
+        ax.axis('off')
+    else:
+        ax.set_xlabel('X (pixels)')
+        ax.set_ylabel('Y (pixels)')
+
+    fig.tight_layout()
+    if out_file is not None:
+        fig.savefig(out_file, dpi=out_dpi)
+    plt.show()
+
+
+def center_calc_ediff(image, detection='hough', refinement='sum', icut=150,
+                       rtype=0, verbose=3, plot=False, csquare=None,
+                       axes_off=False, out_file=None, out_dpi=200,
+                       downsample='auto', target_size=512, **kwargs):
+    """Find the beam centre using the ``ediff`` library.
+
+    Thin wrapper around ``ediff.center.CenterLocator``, kept consistent
+    with :func:`recalibrate_from_isocurve` by returning an ``(x_c, y_c)``
+    tuple instead of the raw ``CenterLocator`` object.
+
+    Parameters
+    ----------
+    image : ndarray
+        2-D image as a numpy array (passed straight to ``CenterLocator``,
+        which handles arrays, file paths and ``Diffractogram2D`` objects).
+    detection, refinement, icut, rtype, verbose : optional
+        Forwarded to ``ediff.center.CenterLocator``. See that class's
+        docstring for details.
+    plot : bool, optional
+        If ``True``, show a diagnostic figure (log-scaled, normalised image)
+        with the fitted centre and refinement ring overlaid. Default is
+        ``False``.
+    csquare, axes_off, out_file, out_dpi : optional
+        Forwarded to the internal plotting helper when ``plot`` is ``True``
+        (zoom window, hide axes, save to file, output DPI).
+    downsample : int, 'auto' or None, optional
+        Binning factor applied to *image* before it is handed to
+        ``CenterLocator``. Default is ``'auto'``: the factor is computed
+        from *target_size* so the largest image dimension ends up close to
+        it (e.g. a 4096x4096 image with the default ``target_size=512``
+        gives ``downsample=8``). Pass an explicit ``int`` to override, or
+        ``1``/``None`` to disable binning entirely.
+        ``ediff``'s ``detection='hough'`` scans a **hard-coded** radius
+        range of 50-120 px and rebuilds a full-image-sized Hough
+        accumulator for every tested radius: on a large image this is both
+        very slow and likely to miss the actual ring (if its radius in
+        pixels is outside 50-120). Downsampling brings the image size and
+        the ring radius back into a range Hough can handle quickly and
+        correctly. The returned centre is automatically rescaled back to
+        the original (full-resolution) pixel coordinates.
+    target_size : int, optional
+        Target size (pixels) used to compute *downsample* when it is set
+        to ``'auto'``. Default is ``512``.
+    **kwargs
+        Any other keyword argument accepted by ``ediff.center.CenterLocator``
+        (e.g. ``masking``, ``ellipse``, ``cintensity``, ...).
+
+    Returns
+    -------
+    x_c, y_c : float
+        Refined centre coordinates (``center.x``, ``center.y``), expressed
+        in the original (full-resolution) pixel grid.
+    """
+    
+
+    img = np.asarray(image, dtype=float)
+
+    if downsample == 'auto':
+        downsample = max(1, round(max(img.shape) / target_size))
+
+    if downsample and downsample > 1:
+        from skimage.transform import rescale
+        img = rescale(img, 1.0 / downsample, anti_aliasing=True,
+                      preserve_range=True)
+
+    center = ed.center.CenterLocator(
+        img,
+        detection=detection,
+        refinement=refinement,
+        icut=icut,
+        rtype=rtype,
+        verbose=verbose,
+        **kwargs,
+    )
+
+    x_c, y_c = center.x, center.y
+    r = getattr(center.center2, 'rr', None) if hasattr(center, 'center2') \
+        else None
+
+    if plot:
+        _plot_center_log(img, x_c, y_c, r=r,
+                          title=f'Center :: {detection}/{refinement}',
+                          csquare=csquare, axes_off=axes_off,
+                          out_file=out_file, out_dpi=out_dpi)
+
+    if downsample and downsample > 1:
+        if r is not None:
+            r *= downsample
+        x_c *= downsample
+        y_c *= downsample
     return x_c, y_c

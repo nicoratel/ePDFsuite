@@ -1,5 +1,5 @@
 from .filereader import load_data
-from .recalibration import recalibrate_from_isocurve
+from .recalibration import recalibrate_from_isocurve, center_calc_ediff
 from .pdf_extraction import compute_ePDF
 from pyFAI import load
 import fabio
@@ -29,8 +29,12 @@ class SAEDProcessor:
                 wiener_epsilon=None,
                 dqe_file=None,
                 verbose=False,
+                # instrument parameters
                 precession_angle=None,
-
+                initial_center=None,
+                # processing parameters
+                skip_center_recalibration=False,
+                amorphous=False
                 ):
         """
         Initialise a SAED data processor.
@@ -62,7 +66,18 @@ class SAEDProcessor:
             If ``True``, print metadata and detector info. Default is ``False``.
         precession_angle : float, optional
             The precession angle of the electron beam in degrees. If ``None``, the angle is not used.
+        amorphous : bool, optional, default=True
+            Selects the automatic beam-centre detection method:
+            - ``True`` : :func:`recalibrate_from_isocurve` (iso-intensity
+              contours), suited to amorphous / diffuse-scattering halos
+              (no sharp ring edge required).
+            - ``False`` : :func:`center_calc_ediff` (Hough transform),
+              suited to crystalline patterns with well-defined diffraction
+              rings/spots.
+            In both cases, falls back to the intensity maximum if the
+            selected method fails.
         """
+        self.amorphous = amorphous
         self.dm4_file = image_file
         self.poni_file = poni_file
         metadata, img = load_data(image_file, verbose=verbose)
@@ -105,22 +120,40 @@ class SAEDProcessor:
         else:
             self.ismtf = False
 
-        # Determine beam centre automatically via iso-intensity contour method.
-        # Fall back to the intensity-maximum if isocurve detection fails.
-        try:
-            cx, cy = recalibrate_from_isocurve(
-                self.img, mask=_mask_as_array(self.mask), plot=False
-            )
-            print(f'Centre estimate from iso-intensity contours: (x={cx:.2f}, y={cy:.2f})')
-        except Exception as _e:
-            _yx = np.unravel_index(np.argmax(self.img), self.img.shape)
-            cy, cx = float(_yx[0]), float(_yx[1])
-            print(
-                f'Warning: iso-intensity centre detection failed ({_e}). '
-                f'Falling back to intensity maximum: (x={cx:.1f}, y={cy:.1f}). '
-                'Refine manually in the app.'
-            )
-        self.center = (cx, cy)
+        # Determine beam centre automatically.
+        # amorphous=True  -> iso-intensity contour method (amorphous halos)
+        # amorphous=False -> ediff Hough-based detection (crystalline rings)
+        # Fall back to the intensity-maximum if the selected method fails.
+        if not skip_center_recalibration:
+            try:
+                if self.amorphous:
+                    cx, cy = recalibrate_from_isocurve(
+                        self.img, mask=_mask_as_array(self.mask), plot=False,
+                        initial_center=initial_center
+                    )
+                    print(f'Centre estimate from iso-intensity contours: (x={cx:.2f}, y={cy:.2f})')
+                else:
+                    cx, cy = center_calc_ediff(self.img)
+                    print(f'Centre estimate from ediff (Hough): (x={cx:.2f}, y={cy:.2f})')
+            except Exception as _e:
+                _yx = np.unravel_index(np.argmax(self.img), self.img.shape)
+                cy, cx = float(_yx[0]), float(_yx[1])
+                print(
+                    f'Warning: centre detection failed ({_e}). '
+                    f'Falling back to intensity maximum: (x={cx:.1f}, y={cy:.1f}). '
+                    'Refine manually in the app.'
+                )
+            self.center = (cx, cy)
+        else:
+            if initial_center is not None:
+                self.center = initial_center
+                print(f'Using user-supplied initial center: (x={self.center[0]:.2f}, y={self.center[1]:.2f})')
+            else:
+                _yx = np.unravel_index(np.argmax(self.img), self.img.shape)
+                cy, cx = float(_yx[0]), float(_yx[1])
+                self.center = (cx, cy)
+                print(f'No initial center provided. Using intensity maximum: (x={cx:.1f}, y={cy:.1f}).')
+        # Manage precession angle: if 0, set to None to avoid unnecessary corrections
         self.precession_angle = precession_angle
         if precession_angle ==0:
             self.precession_angle=None
@@ -251,7 +284,7 @@ class SAEDProcessor:
             plt.show()
         return q, I
 
-    def plot(self,vmin=-4, vmax=0,cmap='jet',display_mask=False):
+    def plot(self,vmin=-4, vmax=0,cmap='jet',display_mask=False,outputfile=None):
         plt.figure()
         if display_mask:
             
@@ -269,28 +302,57 @@ class SAEDProcessor:
             plt.imshow(self.img/np.max(self.img), cmap=cmap, norm=LogNorm(vmin=10**(vmin), vmax=10**(vmax)))
         #plot center as wihte cross
             plt.plot(self.center[0], self.center[1], 'w+', markersize=8)
+            if outputfile is not None:
+                plt.savefig(outputfile, dpi=300, bbox_inches='tight')
 
+
+    def save_thumbnail(self, outputfile=None):
+        """
+        Display a thumbnail of the diffraction image with the detected beam centre.
+
+        Parameters
+        ----------
+        outputfile : str, optional
+            If provided, save the thumbnail to this file path. Default is ``None`` (no saving).
+        """
+        plt.figure(figsize=(6, 6))
+        plt.imshow(self.img, cmap='gray')        
+        plt.axis('off')
+        if outputfile is not None:
+            plt.savefig(outputfile, dpi=300, bbox_inches='tight')
+        
     
     def plot_recalibrated_image(self, **kwargs):
         """
         Display the diffraction image with the detected beam centre.
 
-        Runs :func:`recalibrate_from_isocurve` with ``plot=True``
-        to trigger the diagnostic figure, using ``self.center`` as
-        the initial estimate.  The result is not stored.
+        Runs the beam-centre detection method selected by ``self.amorphous``
+        (set at initialisation) with ``plot=True`` to trigger the
+        diagnostic figure, using ``self.center`` as the initial estimate.
+        ``self.center`` is updated with the result.
 
         Parameters
         ----------
         **kwargs
-            Extra keyword arguments forwarded to
-            :func:`recalibrate_from_isocurve` (e.g. ``n_levels``,
-            ``level_range``, ``rms_rel_max``, ``min_arc_deg``,
-            ``cluster_window``).
+            Extra keyword arguments forwarded to the underlying detection
+            function:
+            - if ``self.amorphous`` is ``True``, forwarded to
+              :func:`recalibrate_from_isocurve` (e.g. ``n_levels``,
+              ``level_range``, ``rms_rel_max``, ``min_arc_deg``,
+              ``cluster_window``, ``initial_center``);
+            - if ``self.amorphous`` is ``False``, forwarded to
+              :func:`center_calc_ediff` (e.g. ``detection``,
+              ``refinement``, ``icut``, ``rtype``, ``downsample``).
         """
-        c_x,c_y = recalibrate_from_isocurve(
-            self.img, mask=_mask_as_array(self.mask), plot=True,
-            initial_center=self.center, **kwargs
-        )
+        if self.amorphous:
+            # Extract initial_center from kwargs, defaulting to self.center if not provided
+            initial_center = kwargs.pop('initial_center', self.center)
+            c_x, c_y = recalibrate_from_isocurve(
+                self.img, mask=_mask_as_array(self.mask), plot=True,
+                initial_center=initial_center, **kwargs
+            )
+        else:
+            c_x, c_y = center_calc_ediff(self.img, plot=True, **kwargs)
         self.center = (c_x, c_y)
 
     def inspect_histogram(self, bins=256, log_scale=True, exclude_zero=False,
