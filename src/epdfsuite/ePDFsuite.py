@@ -34,7 +34,7 @@ class SAEDProcessor:
                 initial_center=None,
                 # processing parameters
                 skip_center_recalibration=False,
-                amorphous=False
+                amorphous=True
                 ):
         """
         Initialise a SAED data processor.
