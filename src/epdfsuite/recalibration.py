@@ -44,7 +44,7 @@ def _fit_circle_algebraic(y_pts, x_pts):
 # Iso-intensity contour method (amorphous halo + large beamstop)
 # ============================================================
 
-def recalibrate_from_isocurve(image, n_levels=7, level_range=(0.15, 0.75),
+def recalibrate_from_isocurve(image, n_levels=5, level_range=(0.05, 0.25),
                                min_points=40, fit_circle=True,
                                rms_rel_max=0.15, min_arc_deg=60.0,
                                cluster_window=15.0,
