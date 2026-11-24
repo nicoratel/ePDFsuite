@@ -2,8 +2,84 @@ import re
 import os
 import sys
 import hyperspy.api as hs
+import fabio
 from .camera_library import DETECTOR_LIBRARY
 import numpy as np
+import json
+from pathlib import Path
+
+LIBRARY_PATH = Path(__file__).parent / "camera_library.json"
+
+
+
+def load_library():
+    with open(LIBRARY_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
+    
+DETECTOR_LIBRARY = load_library() if LIBRARY_PATH.exists() else DETECTOR_LIBRARY
+
+def add_entry(key, value):
+    """
+    Add a new entry to the detector library and save it to disk.
+
+    Parameters
+    ----------
+    key : str
+        Unique identifier for the detector (e.g. ``'K3_300kV'``).
+    value : dict
+        Dictionary containing detector parameters, e.g. ``pixel_size``,
+        ``image_width``, ``image_height``, ``binning``, ``description``, and ``aliases``.
+    """
+    library = load_library()
+    library[key] = value
+    with open(LIBRARY_PATH, "w", encoding="utf-8") as f:
+        json.dump(library, f, indent=4, ensure_ascii=False)
+
+
+def create_manual_detector(
+    camera_key,
+    pixel_size,
+    image_width,
+    image_height,
+    binning=1,
+    description='',
+    wavelength = 0.025079
+):
+    """
+    Create a manual detector entry with specified parameters.
+
+    Parameters
+    ----------
+    camera_key : str
+        Unique identifier for the detector (e.g. ``'K3_300kV'``).
+    pixel_size : float
+        Size of each pixel in micrometers.
+    image_width : int
+        Width of the image in pixels.
+    image_height : int
+        Height of the image in pixels.
+    binning : int, optional
+        Binning factor for the detector. Default is 1.
+    description : str, optional
+        Description of the detector. Default is an empty string.
+    wavelength : float, optional
+        Wavelength of the X-rays in nanometers. Default is 0.025079.
+
+    Returns
+    -------
+    dict
+        Dictionary containing the detector parameters.
+    """
+    return {
+        'camera_type': camera_key,
+        'camera_title': camera_key,
+        'pixel_size': pixel_size,
+        'image_width': image_width,
+        'image_height': image_height,
+        'binning': binning,
+        'description': description,
+        'wavelength': wavelength
+    }
 
 
 def extract_camera_type(metadata, original_metadata=None, detector_lib=DETECTOR_LIBRARY):
@@ -124,6 +200,12 @@ def extract_camera_type(metadata, original_metadata=None, detector_lib=DETECTOR_
         print(f"Error extracting camera type: {e}")
 
     return None, None
+
+def extract_scale(image):
+    """Retourne (scale, unit) de l'axe x d'une image HyperSpy."""
+    ax = image.axes_manager.signal_axes[0]
+    unit = ax.units if ax.units not in (None, '<undefined>') else ''
+    return float(ax.scale), unit
 
 def _search_metadata_recursive(obj, target_keys, depth=0, max_depth=10):
     """
@@ -330,7 +412,7 @@ def get_detector_params(camera_key, detector_lib=DETECTOR_LIBRARY):
         print(f"Available cameras: {list(detector_lib.keys())}")
         return None
     
-def load_data(file, normalize=True, verbose=True):
+def load_data(file, normalize=True, verbose=True, detector_info = None):
     """
     Load a DM4 image file and return detector metadata and the image array.
 
@@ -361,42 +443,76 @@ def load_data(file, normalize=True, verbose=True):
     """
     
     
-    # Load image
-    image = hs.load(file)
-    metadata = image.metadata
+    user_provided_detector_info = detector_info is not None
     
-    raw_image = image.data
+    # Some acquisition systems (e.g. PSD/area detectors) save raw images in
+    # EDF format (ASCII header starting with '{') even under a .tif/.tiff
+    # extension, which HyperSpy/tifffile cannot parse. Detect this case by
+    # peeking at the first bytes and fall back to fabio.
+    is_edf = False
+    try:
+        with open(file, 'rb') as f:
+            header_start = f.read(16)
+        if header_start.lstrip().startswith(b'{'):
+            is_edf = True
+    except OSError:
+        pass
+
+    if is_edf:
+        edf_image = fabio.open(file)
+        metadata = edf_image.header
+        original_metadata = None
+        raw_image = edf_image.data
+        scale, unit = 1.0, ''
+    else:
+        # Load image
+        image = hs.load(file)
+        metadata = image.metadata
+        original_metadata = getattr(image, 'original_metadata', None)
+
+        raw_image = image.data
+
+        scale, unit = extract_scale(image)
     
     # Extract detector info automatically
-    camera_key, camera_title = extract_camera_type(metadata, getattr(image, 'original_metadata', None))
+    camera_key, camera_title = extract_camera_type(metadata, original_metadata)
     
     # Extract wavelength information
     wavelength_info = extract_wavelength(metadata)
     
-    if camera_key:
-        print(f"  ✓ camera type from database: {camera_key}")
-        detector_info = get_detector_params(camera_key)
-        detector_info['camera_type'] = camera_key
-        detector_info['camera_title'] = camera_title
-        detector_info['binning'] = detector_info['image_height'] / raw_image.shape[0]  # Calculate binning from image dimensions
-        
-    else:
-        # If detector not found, create dict with default values
-        detector_info = {
-            'camera_type': None,
-            'camera_title': camera_title,
-            'wavelength' : wavelength_info,
-            'pixel_size': None,
-            'image_width': raw_image.shape[1],
-            'image_height': raw_image.shape[0],
-            'binning': 1,
-            'description': 'Unknown detector',
-            'wavelength': wavelength_info if wavelength_info is not None else None,           
-            'note': 'Dimensions from raw image'
-        }
+    if detector_info is None:
+        camera_key, camera_title = extract_camera_type(
+            metadata,
+            original_metadata
+        )
+
+        if camera_key:
+            detector_info = get_detector_params(camera_key)
+            detector_info['camera_type'] = camera_key
+            detector_info['camera_title'] = camera_title
+            detector_info['binning'] = (
+                detector_info['image_height'] / raw_image.shape[0]
+            )
+        else:
+            # Detector not found, create dict with default values
+            detector_info = {
+                'camera_type': None,
+                'camera_title': camera_title,
+                'pixel_size': None,
+                'image_width': raw_image.shape[1],
+                'image_height': raw_image.shape[0],
+                'binning': 1,
+                'description': 'Unknown detector',
+                'wavelength': wavelength_info,
+                'note': 'Dimensions from raw image'
+            }
+    # else: detector_info was explicitly provided by the caller, keep it as-is
+    detector_info['scale'] = scale
+    detector_info['unit'] = unit
     
-    # Add wavelength information if available
-    if wavelength_info is not None:
+    # Add wavelength information if available (do not override a wavelength
+    # explicitly supplied by the caller via detector_info)
+    if wavelength_info is not None and not user_provided_detector_info:
         detector_info['wavelength'] = wavelength_info
     
     # Extract exposure time
