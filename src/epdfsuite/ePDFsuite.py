@@ -24,6 +24,8 @@ class SAEDProcessor:
                 image_file,
                 poni_file = None,
                 mask=None,
+                # camera parameters (optional)
+                detector_info=None,
                 # deconvolution parameters
                 mtf_file=None,
                 wiener_epsilon=None,
@@ -34,7 +36,7 @@ class SAEDProcessor:
                 initial_center=None,
                 # processing parameters
                 skip_center_recalibration=False,
-                amorphous=True
+                center_method='iso'
                 ):
         """
         Initialise a SAED data processor.
@@ -66,21 +68,26 @@ class SAEDProcessor:
             If ``True``, print metadata and detector info. Default is ``False``.
         precession_angle : float, optional
             The precession angle of the electron beam in degrees. If ``None``, the angle is not used.
-        amorphous : bool, optional, default=True
-            Selects the automatic beam-centre detection method:
-            - ``True`` : :func:`recalibrate_from_isocurve` (iso-intensity
+        center_method : str, optional, default='iso'
+            The method to use for automatic beam-centre detection:
+            - ``'iso'`` or ``'isocurve'`` or ``'isocurves'`` : :func:`recalibrate_from_isocurve` (iso-intensity
               contours), suited to amorphous / diffuse-scattering halos
               (no sharp ring edge required).
-            - ``False`` : :func:`center_calc_ediff` (Hough transform),
+            - ``'hough'`` or ``'ediff'`` : :func:`center_calc_ediff` (Hough transform),
               suited to crystalline patterns with well-defined diffraction
               rings/spots.
             In both cases, falls back to the intensity maximum if the
             selected method fails.
         """
-        self.amorphous = amorphous
+        if center_method in ['iso', 'isocurve', 'isocurves']:
+            self.amorphous = True
+        elif center_method in ['hough', 'ediff']:
+            self.amorphous = False
+        else:
+            raise ValueError(f"Invalid center_method '{center_method}'. Must be one of: 'iso', 'isocurve', 'isocurves', 'hough', 'ediff'.")
         self.dm4_file = image_file
         self.poni_file = poni_file
-        metadata, img = load_data(image_file, verbose=verbose)
+        metadata, img = load_data(image_file, verbose=verbose,detector_info=detector_info)
         self.metadata = metadata
         self.img = img
 
@@ -315,12 +322,67 @@ class SAEDProcessor:
         outputfile : str, optional
             If provided, save the thumbnail to this file path. Default is ``None`` (no saving).
         """
-        plt.figure(figsize=(6, 6))
-        plt.imshow(self.img, cmap='gray')        
+        # find information to plot scalebar
+        scale = self.metadata.get('scale', None)
+        unit = self.metadata.get('unit', None)
+        
+        if scale is not None:
+                    
+                    value,  scale_length_pixels = self.scalebar_length_px(scale, n_pixels=self.img.shape[1])
+                    img_height, img_width = self.img.shape
+                    # Create a figure and axis
+                    plt.figure(figsize=(6, 6))
+                    plt.imshow(self.img, cmap='gray')
+                    plt.axis('off')
+        
+                    # Add the scale bar for real space images (not for reciprocal space)
+                    if unit != '1/nm':
+                        ystart = int(0.9*img_height)
+                        xstart = int(0.1*img_width)
+                        plt.hlines(y=ystart, xmin=xstart, xmax=xstart + scale_length_pixels,
+                                   colors='white', linewidth=3)
+                        plt.text(xstart + scale_length_pixels / 2, ystart - 10,
+                                 f'{value:d} {unit}', color='white',
+                                 ha='center', va='bottom', fontsize=10)
+                    
+        else:
+            plt.figure(figsize=(6, 6))
+            plt.imshow(self.img, cmap='gray')
         plt.axis('off')
         if outputfile is not None:
             plt.savefig(outputfile, dpi=300, bbox_inches='tight')
-        
+
+    def scalebar_length_px(self,scale, n_pixels, fraction=0.1,
+                       values=(1, 2, 5, 10, 20, 50, 100, 200, 500, 1000)):
+        """
+        Choisit, parmi des valeurs prédéfinies, celle dont la longueur en pixels
+        est la plus proche de `fraction` * n_pixels.
+
+        Parameters
+        ----------
+        scale : float
+            Taille d'un pixel (en `unit`).
+        unit : str
+            Unité de l'échelle (ex. 'nm').
+        n_pixels : int
+            Nombre de pixels de l'axe de référence (largeur par exemple).
+        fraction : float, optional
+            Fraction visée de l'axe. Défaut 0.1.
+        values : sequence of float, optional
+            Valeurs autorisées pour la barre, exprimées dans `unit`.
+
+        Returns
+        -------
+        value : float
+            Valeur retenue (ex. 20).
+        unit : str
+            Unité associée.
+        length_px : int
+            Longueur de la barre en pixels.
+        """
+        target_px = fraction * n_pixels
+        value = min(values, key=lambda v: abs(v / scale - target_px))
+        return value, int(round(value / scale))   
     
     def plot_recalibrated_image(self, **kwargs):
         """

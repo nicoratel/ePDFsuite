@@ -69,7 +69,8 @@ def build_calibration_data_from_cif(
 def perform_geometric_calibration(
         cif_file: str,
         image_file: str,
-        mtf_file: str = None):
+        mtf_file: str = None,
+        detector_info: dict = None):
     """
     Perform geometric calibration of electron diffraction data using pyFAI-calib2.
 
@@ -90,7 +91,7 @@ def perform_geometric_calibration(
     """
     
     # load data and metadata
-    detector_info, raw_image = load_data(image_file)
+    detector_info, raw_image = load_data(image_file, detector_info=detector_info)
     if mtf_file is not None:
         # apply MTF deconvolution to raw image
         from .utilities import deconvolve_mtf_2d

@@ -234,8 +234,97 @@ def fit_polynomial_background(q, Fm, rpoly=0.9, qmin=0.3, qmax=None):
 
     return q * poly(q)
 
-
 def estimate_affine_high_q_normalization(q, Iexp, f2avg, qmax):
+    """
+    Estimate affine high-Q normalization parameters alpha and beta with 
+    adaptive window sizing to remain stable at lower Qmax.
+    """
+    eps = np.finfo(float).eps
+
+    # Adaptation dynamique de la fraction haute-Q selon Qmax
+    # Si Qmax est petit (ex: < 18 Å⁻¹), on élargit la fenêtre (ex: top 25% au lieu de top 10%)
+    if qmax < 18.0:
+        fraction = 0.75
+    elif qmax < 25.0:
+        fraction = 0.80
+    else:
+        fraction = 0.90
+
+    mask_inf = q > fraction * qmax
+    valid_inf = mask_inf & np.isfinite(Iexp) & np.isfinite(f2avg)
+
+    # Sécurité : s'assurer d'avoir un minimum de points pour un fit robuste (ex: au moins 15 points)
+    min_pts = 15
+    if valid_inf.sum() < min_pts:
+        # Si la grille est trop courte, on prend une plus large portion de la fin
+        sorted_indices = np.where(np.isfinite(Iexp) & np.isfinite(f2avg))[0]
+        if sorted_indices.size > min_pts:
+            valid_inf = np.zeros_like(q, dtype=bool)
+            valid_inf[sorted_indices[-min_pts:]] = True
+        else:
+            valid_inf = np.isfinite(Iexp) & np.isfinite(f2avg)
+
+    Ih = Iexp[valid_inf]
+    F2h = f2avg[valid_inf]
+
+    if Ih.size == 0:
+        return 1.0, 0.0
+
+    Ihc = Ih - Ih.mean()
+    F2hc = F2h - F2h.mean()
+    var_Ih = np.mean(Ihc**2)
+
+    if var_Ih > eps:
+        alpha = np.mean(Ihc * F2hc) / var_Ih
+    else:
+        alpha = np.mean(F2h / (Ih + eps))
+
+    # Estimation robuste par pentes par paires (Theil-Sen simplifié)
+    n_tail = Ih.size
+    if n_tail > 1:
+        max_pts = 300
+        if n_tail > max_pts:
+            idx = np.linspace(0, n_tail - 1, max_pts).astype(int)
+            I_sub, F2_sub = Ih[idx], F2h[idx]
+        else:
+            I_sub, F2_sub = Ih, F2h
+        
+        iu = np.triu_indices(I_sub.size, k=1)
+        dI = I_sub[:, None] - I_sub[None, :]
+        dF2 = F2_sub[:, None] - F2_sub[None, :]
+        dI, dF2 = dI[iu], dF2[iu]
+        pair_valid = np.abs(dI) > eps
+        slopes = dF2[pair_valid] / dI[pair_valid]
+        slopes = slopes[np.isfinite(slopes)]
+    else:
+        slopes = np.array([])
+
+    if slopes.size > 0:
+        s_med = np.median(slopes)
+        s_mad = np.median(np.abs(slopes - s_med))
+        if s_mad > eps:
+            sigma = 1.4826 * s_mad
+            alpha_lo = s_med - 4.0 * sigma
+            alpha_hi = s_med + 4.0 * sigma
+        else:
+            spread = max(0.15 * abs(s_med), 1e-6)
+            alpha_lo = s_med - spread
+            alpha_hi = s_med + spread
+        if alpha_lo > alpha_hi:
+            alpha_lo, alpha_hi = alpha_hi, alpha_lo
+        alpha = np.clip(alpha, alpha_lo, alpha_hi)
+
+    # Calcul de beta avec un contrôle strict pour éviter les dérives à bas Qmax
+    beta = np.mean(F2h - alpha * Ih)
+
+    # Contrainte de clipping plus conservatrice sur beta
+    beta_clip = 0.005 * np.mean(np.abs(f2avg[np.isfinite(f2avg)]))
+    if np.isfinite(beta_clip) and beta_clip > 0:
+        beta = np.clip(beta, -beta_clip, beta_clip)
+
+    return alpha, beta
+
+def estimate_affine_high_q_normalization_old(q, Iexp, f2avg, qmax):
     """
     Estimate affine high-Q normalization parameters alpha and beta.
 
@@ -287,10 +376,45 @@ def estimate_affine_high_q_normalization(q, Iexp, f2avg, qmax):
     else:
         alpha = np.mean(F2h / (Ih + eps))
 
-    # Keep alpha close to the physically expected high-Q ratio scale.
-    ratio_ref = np.mean(F2h) / (np.mean(Ih) + eps)
-    if np.isfinite(ratio_ref) and ratio_ref > 0:
-        alpha = np.clip(alpha, 0.2 * ratio_ref, 5.0 * ratio_ref)
+    # Guard alpha with robust, offset-invariant pairwise-slope bounds
+    # (Theil-Sen-like). A plain ratio mean(F2h)/mean(Ih) is NOT invariant to
+    # a nonzero intercept and becomes badly biased whenever the raw
+    # intensity carries a significant additive offset (e.g. an imperfectly
+    # subtracted background/dark level) -- exactly the situation beta is
+    # meant to handle. Pairwise slopes (F2h_j - F2h_i) / (Ih_j - Ih_i) cancel
+    # any such offset and remain a valid proxy for alpha.
+    n_tail = Ih.size
+    if n_tail > 1:
+        max_pts = 200  # cap pairwise cost for large tails
+        if n_tail > max_pts:
+            idx = np.linspace(0, n_tail - 1, max_pts).astype(int)
+            I_sub, F2_sub = Ih[idx], F2h[idx]
+        else:
+            I_sub, F2_sub = Ih, F2h
+        iu = np.triu_indices(I_sub.size, k=1)
+        dI = I_sub[:, None] - I_sub[None, :]
+        dF2 = F2_sub[:, None] - F2_sub[None, :]
+        dI, dF2 = dI[iu], dF2[iu]
+        pair_valid = np.abs(dI) > eps
+        slopes = dF2[pair_valid] / dI[pair_valid]
+        slopes = slopes[np.isfinite(slopes)]
+    else:
+        slopes = np.array([])
+
+    if slopes.size > 0:
+        s_med = np.median(slopes)
+        s_mad = np.median(np.abs(slopes - s_med))
+        if s_mad > eps:
+            sigma = 1.4826 * s_mad
+            alpha_lo = s_med - 5.0 * sigma
+            alpha_hi = s_med + 5.0 * sigma
+        else:
+            spread = max(0.2 * abs(s_med), 1e-6)
+            alpha_lo = s_med - spread
+            alpha_hi = s_med + spread
+        if alpha_lo > alpha_hi:
+            alpha_lo, alpha_hi = alpha_hi, alpha_lo
+        alpha = np.clip(alpha, alpha_lo, alpha_hi)
 
     beta = np.mean(F2h - alpha * Ih)
 
@@ -421,9 +545,11 @@ def compute_ePDF(
     qstep = q[1] - q[0]
 
     # --- Electron scattering factors (single Lobato call) ---
+    effective_qmax = max(qmax, qmaxinst)
+    
     q_sf, favg, f2avg = compute_scattering_factors(
         composition,
-        x_max=qmax,
+        x_max=effective_qmax,  # Utilise le maximum réel étendu
         x_step=qstep,
         qvalues=True,
         xray=False,
@@ -436,6 +562,7 @@ def compute_ePDF(
 
     # --- Modified intensity F(Q) = Q * (S(Q) - 1) ---
     # S(Q) - 1 = (alpha*I + beta - <f²>) / <f>²
+    Sm = 1 + ((alpha * Iexp + beta - f2avg) / favg**2)
     Fm = q * (alpha * Iexp + beta - f2avg) / favg**2
 
     # --- Polynomial background (PDFgetX3 philosophy) ---
@@ -444,7 +571,7 @@ def compute_ePDF(
     )
 
     Fc = Fm - background  # NO Q-DAMPING
-
+    
     # --- Fourier transform ---
     r = np.arange(rmin, rmax + rstep, rstep)
     mask = (q >= qmin) & (q <= qmax)
